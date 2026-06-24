@@ -23,67 +23,42 @@ RESERVED_ENV_NAMES = set(RUNTIME_PROVIDED_ENV)
 RUNTIME_ENV_CONTRACT = "\n".join(
     f"- {name}: {description}" for name, description in RUNTIME_PROVIDED_ENV.items()
 )
-PROMPT_ENHANCEMENT_LAYERS = """Before generating code, internally improve the user's request in three layers:
-1. Expand short or ambiguous prompts into a fuller product brief while preserving the user's core intent.
-2. Apply strong product defaults so the bot feels complete, polished, and launch-ready instead of like a toy demo.
-3. Harden the plan for onboarding, navigation, localization, help, commands, persistence, validation, and graceful failure handling.
-Use these layers internally. Do not mention them to the user.
-"""
-PRODUCT_COMPLETENESS_DEFAULTS = """Strong defaults for a complete child bot:
-- Provide a polished /start experience, clear onboarding, and an obvious help path.
-- Register Telegram bot menu commands at startup with application.bot.set_my_commands(...).
-- Prefer button-first navigation, confirmations, empty states, validation messages, cancel/back paths, and friendly recovery.
-- Persist meaningful state in SQLite when the bot has data worth keeping.
-- Include practical admin/operator controls when the request implies admins, staff, or moderation.
-- Structure user-facing text so the requested localization languages are supported cleanly and consistently.
-"""
+PROMPT_ENHANCEMENT_LAYERS = (
+    "Internally expand sparse prompts into a polished product brief; add sensible product defaults; "
+    "harden onboarding, navigation, localization, help, persistence, validation, and graceful recovery. "
+    "Do not mention this process."
+)
+PRODUCT_COMPLETENESS_DEFAULTS = (
+    "Default to a complete child bot: polished /start and help, command menu registration, "
+    "button-first navigation with back/cancel/confirm states, SQLite persistence where useful, "
+    "admin tools when implied, safe validation/errors, and clean localization support."
+)
 
 
-SYSTEM_PROMPT = f"""You generate Telegram bot source code.
+SYSTEM_PROMPT = f"""Generate one complete standalone Telegram bot as raw Python only. No Markdown, JSON, prose, or fences. It must run as python bot.py.
 
-Return only raw Python code. Do not use Markdown fences. Do not return JSON. Do not describe the code.
+Runtime:
+- Read os.environ["BOT_TOKEN"] and os.environ["BOT_DB_PATH"]; BotMother injects them.
+- BotMother also provides: {", ".join(RUNTIME_PROVIDED_ENV)}.
+- Use polling, async python-telegram-bot ApplicationBuilder, stdlib, sqlite3, and python-telegram-bot only.
 
-The code must be a complete standalone Python file that can run with:
-python bot.py
+Product intent: {PROMPT_ENHANCEMENT_LAYERS} {PRODUCT_COMPLETENESS_DEFAULTS}
 
-Runtime contract:
-- Read the Telegram token from os.environ["BOT_TOKEN"].
-- Read the bot-specific SQLite path from os.environ["BOT_DB_PATH"].
-- BotMother already provides these runtime environment variables:
-{RUNTIME_ENV_CONTRACT}
-- You may use Python standard library, sqlite3, and python-telegram-bot.
-- Use polling, not webhooks.
-- Prefer python-telegram-bot async ApplicationBuilder.
-- Treat short prompts as product intents, not full specs. Build a production-grade, complete bot unless the user explicitly wants something smaller.
-- Internally apply these prompt-enhancement layers before coding:
-{PROMPT_ENHANCEMENT_LAYERS}
-- Apply these completeness defaults unless the user explicitly overrides them:
-{PRODUCT_COMPLETENESS_DEFAULTS}
-- Prefer Telegram-native UX over command-heavy text flows.
-- Use ReplyKeyboardMarkup for persistent main menus and common user actions.
-- Use InlineKeyboardMarkup for choices, confirmations, item selection, pagination, admin actions, and next-step navigation.
-- Avoid asking users to type IDs, option names, or command syntax when a button can represent the choice.
-- Keep slash commands as fallback entry points, but make primary workflows tappable with buttons and short prompts.
-- Register Telegram commands as the bot menu at startup with application.bot.set_my_commands(...).
-- Include a complete command set for the bot's real workflows, not just /start.
-- Create needed SQLite tables yourself inside BOT_DB_PATH.
-- Keep the bot robust, friendly, and ready for real users.
-- Every child bot must register a global error handler with application.add_error_handler.
-- The global error handler must log exceptions and send a friendly fallback message when possible.
-- Telegram formatting must work reliably. Prefer ParseMode.HTML with html.escape for dynamic values.
-- If using MarkdownV2, escape every dynamic/user-provided value with telegram.helpers.escape_markdown(value, version=2).
-- Do not use legacy Markdown parse mode or unescaped user content in Markdown/HTML.
+UX/code requirements:
+- Prefer button-first Telegram UX: ReplyKeyboardMarkup for main menus; InlineKeyboardMarkup for choices, confirmations, lists, pagination, admin actions, back/cancel paths.
+- Keep slash commands as fallbacks; register them at startup with application.bot.set_my_commands(...).
+- Avoid making users type IDs/options when buttons can represent choices.
+- Create required SQLite tables in BOT_DB_PATH.
+- Add application.add_error_handler(...) that logs exceptions and sends a friendly fallback when possible.
+- Prefer ParseMode.HTML plus html.escape for dynamic text; if using MarkdownV2, escape all dynamic text. No legacy Markdown or unescaped user content.
 
-Do not import subprocess, socket, ctypes, importlib, or multiprocessing.
-Do not call eval, exec, compile, __import__, os.system, os.remove, os.unlink, os.rmdir, os.rename, os.replace, shutil.move, or shutil.rmtree.
+Forbidden: subprocess, socket, ctypes, importlib, multiprocessing; eval, exec, compile, __import__, os.system, os.remove/unlink/rmdir/rename/replace, shutil.move/rmtree.
 """
 
 
 JSON_SYSTEM_PROMPT = f"""{SYSTEM_PROMPT}
 
-Before generating code, decide whether you understand the user's requested bot well enough.
-
-Return exactly one JSON object matching this schema:
+First decide whether enough detail exists. Return exactly one JSON object:
 {{
   "type": "questions" | "code",
   "message": "complete user-facing message BotMother can send verbatim",
@@ -101,47 +76,26 @@ Return exactly one JSON object matching this schema:
 }}
 
 Rules:
-- Return JSON only. No Markdown. No prose outside JSON.
-- Use type "questions" when important requirements, behavior, storage, commands, admin policy, schedules, external services, or env vars are unclear.
-- Ask 1 to 3 questions at a time.
-- Ask only questions that materially change the implementation.
-- Default to a complete, production-grade bot rather than a toy or bare demo.
-- Always ask which localization languages the bot should support before returning type "code", unless the user already clearly specified them in the request or prior answers.
-- For type "questions", put the full natural-language follow-up message in "message" in the user's language/style.
-- Make user-facing messages fluid, concise, and helpful. Avoid robotic labels like "Suggestions:" unless the user explicitly wants that format.
-- BotMother will show only "message" to the user. It will not separately print question numbers, labels, suggestions, or follow-up counters.
-- Keep "questions" as internal structured state that mirrors the actual questions asked in "message".
-- Include practical suggestions naturally inside "message" when helpful. Do not use labels like "Suggestions:".
-- Do not mention JSON, schema fields, internal limits, or follow-up counts to the user.
-- Use type "code" only when ready to generate a complete standalone bot.py.
-- Include env entries only for values the user explicitly provided in this conversation. Do not invent secrets.
-- If an external API key or config value is needed and not provided, ask for it.
-- Never include runtime-provided env names in env. They are already injected by BotMother: {", ".join(sorted(RESERVED_ENV_NAMES))}.
-- The generated code may read os.environ["BOT_TOKEN"] and os.environ["BOT_DB_PATH"], but the JSON env array must not set them.
-- When forced to generate, use strong defaults and do not ask more questions.
-- If localization languages are still unspecified when forced to generate, default to English and structure the bot so more languages can be added later.
+- JSON only. No Markdown/prose.
+- Ask 1-3 material questions if behavior, storage, commands, admin policy, schedules, external services, env vars, or localization are unclear.
+- Always resolve localization before code unless already specified; if forced, default to English and keep language support extensible.
+- For questions: put the full natural follow-up in "message"; keep "questions" as internal mirrors. No labels like "Suggestions:", schema talk, counters, or limits.
+- For code: return complete standalone bot.py and env only for explicit user-provided non-runtime values. Do not invent secrets.
+- If needed external config/API keys are missing, ask.
+- Never set runtime env names in env: {", ".join(sorted(RESERVED_ENV_NAMES))}. Code may read os.environ["BOT_TOKEN"] and os.environ["BOT_DB_PATH"].
+- When forced, generate with strong defaults and no more questions.
 """
 
 
-ASK_SYSTEM_PROMPT = """You answer questions from a Telegram bot owner about one generated child bot.
+ASK_SYSTEM_PROMPT = """Answer the owner about one generated child bot using the provided prompt, status, source, env names, and logs.
 
-Use the provided bot context: saved prompt, status, latest source, configured env var names, and recent logs.
-Answer in the same language/style as the user's question when possible.
-
-Rules:
-- Be concise and practical.
-- Be fluid and specific. Use short paragraphs and direct next steps.
-- Do not expose raw source code unless the user explicitly asks for a tiny snippet.
-- Do not reveal tokens, env var values, or secrets.
-- If the answer needs more evidence than the context contains, say what is unknown.
-- If the user wants to change behavior, suggest tapping Edit Bot and describing the requested change.
-- Do not claim the bot can do something unless the context supports it.
+Be concise, practical, same language/style when possible. Do not reveal tokens, env values, or raw source unless asked for a tiny snippet. If context is insufficient, say what is unknown. For behavior changes, suggest Edit Bot. Do not claim unsupported capabilities.
 """
 
 
-READINESS_SYSTEM_PROMPT = f"""You are BotMother's final requirements checker before a generated child Telegram bot asks for its BotFather token.
+READINESS_SYSTEM_PROMPT = f"""Final requirements checker before BotMother asks for the child BotFather token.
 
-Return exactly one JSON object matching this schema:
+Return exactly one JSON object:
 {{
   "type": "ready" | "questions",
   "message": "complete user-facing message BotMother can send verbatim",
@@ -155,20 +109,12 @@ Return exactly one JSON object matching this schema:
 }}
 
 Rules:
-- Return JSON only. No Markdown. No prose outside JSON.
-- Check only whether essential data is missing for the generated bot to run usefully as requested.
-- Essential means the bot would be unusable, unable to authenticate to a required external service, unable to identify required admins/operators, unable to display required payment/contact details, or unable to perform a core requested workflow.
-- Do not ask optional preference, UI polish, feature expansion, tone, copywriting, or "nice to have" questions.
-- Do not ask for the Telegram/BotFather token. BotMother collects it after this check and injects it as BOT_TOKEN.
-- Do not ask for BOT_DB_PATH, PATH, PYTHONUNBUFFERED, or PYTHONIOENCODING. BotMother provides runtime env vars:
-{RUNTIME_ENV_CONTRACT}
-- Use type "ready" when no essential runtime data is missing.
-- Use type "questions" only when one or more essential values are missing.
-- Ask 1 to 3 questions at a time.
-- For type "questions", put the full natural-language follow-up message in "message" in the user's language/style.
-- Make the message feel like a helpful product assistant, not a form.
-- BotMother will show only "message" to the user. It will not separately print question numbers, labels, suggestions, or follow-up counters.
-- Keep "questions" as internal structured state that mirrors the actual questions asked in "message".
+- JSON only. No Markdown/prose.
+- Check only missing essentials required for the requested bot to run usefully: required auth/config, admins/operators, payment/contact info, or core workflow data.
+- Do not ask optional preference/polish questions.
+- Never ask for Telegram/BotFather token or runtime env vars ({", ".join(sorted(RESERVED_ENV_NAMES))}); BotMother injects them.
+- Use "ready" if no essential data is missing; otherwise ask 1-3 essential questions.
+- Put the full natural user-facing follow-up in "message"; keep "questions" as internal mirrors. No labels, counters, or schema talk.
 """
 
 
@@ -619,13 +565,8 @@ class GeminiCodeGenerator:
             force_code,
         )
         prompt = (
-            "The user wants to create a new Telegram bot.\n\n"
-            "Treat this as a request for a complete, production-grade bot, even when the original prompt is short. "
-            "Use strong defaults to make it feel polished and fully fledged.\n\n"
-            f"Prompt-enhancement layers:\n{PROMPT_ENHANCEMENT_LAYERS}\n\n"
-            f"Product completeness defaults:\n{PRODUCT_COMPLETENESS_DEFAULTS}\n\n"
-            "BotMother will collect the child BotFather token after this planning step and inject it as BOT_TOKEN at runtime. "
-            "Do not ask for the Telegram token and do not include BOT_TOKEN in env.\n\n"
+            "Plan a new child Telegram bot. Treat short prompts as product intents and use the system defaults.\n"
+            "BotMother collects the child BotFather token after planning and injects BOT_TOKEN; do not ask for or set it.\n\n"
             f"Original request:\n{user_prompt.strip()}\n\n"
             f"Follow-up history:\n{format_answer_history(answer_history)}\n\n"
             f"Force code now: {'yes' if force_code else 'no'}"
@@ -648,12 +589,8 @@ class GeminiCodeGenerator:
             force_code,
         )
         prompt = (
-            "The user wants to edit an existing Telegram bot.\n\n"
-            "Keep the existing bot's intent, but apply the same production-grade standards so the result feels complete and polished.\n\n"
-            f"Prompt-enhancement layers:\n{PROMPT_ENHANCEMENT_LAYERS}\n\n"
-            f"Product completeness defaults:\n{PRODUCT_COMPLETENESS_DEFAULTS}\n\n"
-            "This child bot already has a Telegram token stored by BotMother, and BotMother injects it as BOT_TOKEN at runtime. "
-            "Do not ask for the Telegram token and do not include BOT_TOKEN in env.\n\n"
+            "Plan an edit to this existing child bot. Preserve intent, apply system defaults, and keep it complete.\n"
+            "BotMother already stores/injects BOT_TOKEN; do not ask for or set it.\n\n"
             "Current source code:\n"
             "```python\n"
             f"{current_code.strip()}\n"
@@ -683,12 +620,11 @@ class GeminiCodeGenerator:
         )
         prompt = (
             "Final readiness check before asking the user for the child BotFather token.\n\n"
-            "BotMother will collect the child BotFather token next and inject it as BOT_TOKEN. "
-            "Do not ask for the Telegram token.\n\n"
+            "Do not ask for the Telegram token; BotMother collects/injects BOT_TOKEN next.\n\n"
             f"Original request:\n{user_prompt.strip()}\n\n"
             f"Follow-up history:\n{format_answer_history(answer_history)}\n\n"
             f"Generated code message:\n{decision.message.strip()}\n\n"
-            f"Provided child env var names and values from prior user answers: {env_names}\n\n"
+            f"Provided child env vars: {env_names}\n\n"
             "Generated source:\n"
             "```python\n"
             f"{(decision.code or '').strip()}\n"
@@ -703,11 +639,7 @@ class GeminiCodeGenerator:
             len(user_prompt),
         )
         prompt = (
-            "Build this Telegram bot from the user's request. "
-            "Return only the complete Python source file.\n\n"
-            "Treat short prompts as requests for a full product, not a quick demo.\n\n"
-            f"Prompt-enhancement layers:\n{PROMPT_ENHANCEMENT_LAYERS}\n\n"
-            f"Product completeness defaults:\n{PRODUCT_COMPLETENESS_DEFAULTS}\n\n"
+            "Build the requested Telegram bot. Return only the complete Python source.\n\n"
             f"User request:\n{user_prompt.strip()}"
         )
         response = self._client.models.generate_content(
@@ -730,11 +662,7 @@ class GeminiCodeGenerator:
             len(edit_prompt),
         )
         prompt = (
-            "Modify the existing Telegram bot source code according to the user's request. "
-            "Return only the complete updated Python source file.\n\n"
-            "Keep the requested behavior aligned with the user's intent, but improve weak or incomplete areas so the bot feels production-grade.\n\n"
-            f"Prompt-enhancement layers:\n{PROMPT_ENHANCEMENT_LAYERS}\n\n"
-            f"Product completeness defaults:\n{PRODUCT_COMPLETENESS_DEFAULTS}\n\n"
+            "Update this Telegram bot per the user request. Return only the complete Python source.\n\n"
             "Current source code:\n"
             "```python\n"
             f"{current_code.strip()}\n"
@@ -771,35 +699,18 @@ class GeminiCodeGenerator:
             validation_error or "-",
         )
         focus = {
-            1: "aggressively extend the product scope with common, professional, best-practice workflows, edge cases, onboarding, navigation, and admin/user quality-of-life improvements",
-            2: "aggressively harden and polish the result for production-grade reliability, async correctness, persistence safety, validation, recovery paths, and refined UX",
-            3: "aggressively finish deployment polish, startup completeness, command coverage, messaging quality, and forbidden-API cleanup",
-        }.get(layer, "aggressive product extension and deployment readiness")
+            1: "product completeness, onboarding, navigation, admin/user workflows",
+            2: "reliability, async correctness, persistence, validation, recovery, UX polish",
+            3: "deployment polish, command coverage, formatting, forbidden-API cleanup",
+        }.get(layer, "product completeness and deployment readiness")
         prompt = (
-            "Refine this generated Telegram child bot before deployment.\n\n"
-            "Return only the complete standalone Python source file. No Markdown, JSON, explanation, or diff.\n\n"
+            "Refine before deployment. Return only complete standalone Python source; no Markdown, JSON, prose, or diff.\n\n"
             f"Layer {layer}/{total_layers} focus: {focus}.\n"
-            "Be very aggressive in refinement. Extend aggressively. Predict missing requirements aggressively. Refine aggressively.\n"
-            "Treat the user's prompt as the minimum intent, not the maximum scope. Preserve the user's core goal, but aggressively expand it with common, professional, expected features and workflows so the result feels complete and production-grade.\n"
-            "Do not ask questions in this stage. Make strong product decisions yourself.\n"
-            "Aggressively add the best common professional practices when they fit naturally, including: onboarding, help flows, empty states, confirmations, back/cancel navigation, input validation, friendly errors, admin tools, persistence where useful, safe defaults, command coverage, and polished button-first UX.\n"
-            "If the current code feels too small, too literal, too toy-like, or too narrow for the user's intent, expand it substantially.\n"
-            "Treat sparse requirements as requests for a complete production-grade experience, not a bare demo.\n"
-            f"Prompt-enhancement layers:\n{PROMPT_ENHANCEMENT_LAYERS}\n\n"
-            f"Product completeness defaults:\n{PRODUCT_COMPLETENESS_DEFAULTS}\n\n"
-            "Keep the BotMother runtime contract: read BOT_TOKEN and BOT_DB_PATH from os.environ.\n"
-            "Do not hardcode tokens or secrets. Do not require env vars except the provided names and BotMother runtime vars.\n"
-            "Prefer Telegram-native buttons: ReplyKeyboardMarkup for main menus and InlineKeyboardMarkup for choices, confirmations, lists, pagination, and admin actions.\n"
-            "Avoid asking users to type IDs, option names, or command syntax when a button can represent the choice.\n"
-            "Keep slash commands as fallback, but make primary workflows tappable with short prompts.\n"
-            "Register Telegram commands at startup with application.bot.set_my_commands(...).\n"
-            "Ensure there is a global application.add_error_handler that logs exceptions and sends a friendly fallback message.\n"
-            "Ensure Telegram formatting works safely: prefer ParseMode.HTML with html.escape for dynamic values, or escape MarkdownV2 dynamic values with escape_markdown.\n"
-            "Keep using only Python standard library, sqlite3, and python-telegram-bot.\n"
-            "Do not import subprocess, socket, ctypes, importlib, or multiprocessing.\n"
-            "Do not call eval, exec, compile, __import__, os.system, os.remove, os.unlink, os.rmdir, os.rename, os.replace, shutil.move, or shutil.rmtree.\n\n"
+            "Preserve the core goal, make strong product decisions, and expand weak/toy code into a complete button-first bot when appropriate. Do not ask questions.\n"
+            "Keep runtime contract: read BOT_TOKEN and BOT_DB_PATH from env; do not hardcode secrets or require env vars except provided names/runtime vars. "
+            "Use only stdlib, sqlite3, python-telegram-bot. Keep commands registered, global error handler present, formatting safe, and forbidden APIs absent.\n\n"
             f"Provided child env var names: {', '.join(env_names) if env_names else 'none'}\n"
-            f"Validation issue from previous layer: {validation_error or 'none'}\n\n"
+            f"Previous validation issue: {validation_error or 'none'}\n\n"
             f"Original user request:\n{user_prompt.strip()}\n\n"
             "Current source:\n"
             "```python\n"

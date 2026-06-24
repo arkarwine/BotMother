@@ -498,6 +498,16 @@ def build_application(token: str, db: Database, service: BotService):
     async def reply_home(message, text: str) -> None:
         await reply_html(message, text, reply_markup=home_keyboard)
 
+    async def restart_expired_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str, title: str) -> int:
+        context.user_data.clear()
+        await reply_html(
+            update.effective_message,
+            "<b>⌛ This flow expired</b>\n\nPlease choose the bot again.",
+            reply_markup=keyboard_for_user(_remember_user(db, update)),
+        )
+        await choose_bot_for_action(update, action, title)
+        return ConversationHandler.END
+
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
         logger.info("Command /start: user_id=%s chat_id=%s", user_id, _chat_id(update))
@@ -837,6 +847,8 @@ def build_application(token: str, db: Database, service: BotService):
 
     async def ask_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         user_id = _remember_user(db, update)
+        if "ask_bot_id" not in context.user_data:
+            return await restart_expired_flow(update, context, "ask", "💬 Choose a bot to ask about:")
         bot_id = int(context.user_data["ask_bot_id"])
         question = (update.effective_message.text or "").strip()
         if not question:
@@ -1281,6 +1293,8 @@ def build_application(token: str, db: Database, service: BotService):
 
     async def revise_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         user_id = _remember_user(db, update)
+        if "revise_bot_id" not in context.user_data:
+            return await restart_expired_flow(update, context, "revise", "♻️ Choose a bot to regenerate:")
         bot_id = int(context.user_data["revise_bot_id"])
         prompt = (update.effective_message.text or "").strip()
         if not prompt:
@@ -1342,6 +1356,8 @@ def build_application(token: str, db: Database, service: BotService):
 
     async def edit_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         user_id = _remember_user(db, update)
+        if "edit_bot_id" not in context.user_data:
+            return await restart_expired_flow(update, context, "edit", "✏️ Choose a bot to edit:")
         bot_id = int(context.user_data["edit_bot_id"])
         prompt = (update.effective_message.text or "").strip()
         if not prompt:
@@ -1359,6 +1375,8 @@ def build_application(token: str, db: Database, service: BotService):
         update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> int:
         user_id = _remember_user(db, update)
+        if "edit_bot_id" not in context.user_data:
+            return await restart_expired_flow(update, context, "edit", "✏️ Choose a bot to edit:")
         bot_id = int(context.user_data["edit_bot_id"])
         prompt = context.user_data.get("edit_prompt", "")
         answers = context.user_data.get("edit_answers", [])
@@ -1411,6 +1429,8 @@ def build_application(token: str, db: Database, service: BotService):
 
     async def edit_followup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         _remember_user(db, update)
+        if "edit_bot_id" not in context.user_data:
+            return await restart_expired_flow(update, context, "edit", "✏️ Choose a bot to edit:")
         answer = (update.effective_message.text or "").strip()
         if not answer:
             await reply_html(
