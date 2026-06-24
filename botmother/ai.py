@@ -771,15 +771,19 @@ class GeminiCodeGenerator:
             validation_error or "-",
         )
         focus = {
-            1: "requirements coverage and missing edge cases without adding new requirements",
-            2: "runtime reliability, async handler correctness, SQLite safety, and graceful error handling",
-            3: "final deployment polish, clear user messages, startup robustness, and no forbidden APIs",
-        }.get(layer, "deployment readiness and correctness")
+            1: "aggressively extend the product scope with common, professional, best-practice workflows, edge cases, onboarding, navigation, and admin/user quality-of-life improvements",
+            2: "aggressively harden and polish the result for production-grade reliability, async correctness, persistence safety, validation, recovery paths, and refined UX",
+            3: "aggressively finish deployment polish, startup completeness, command coverage, messaging quality, and forbidden-API cleanup",
+        }.get(layer, "aggressive product extension and deployment readiness")
         prompt = (
             "Refine this generated Telegram child bot before deployment.\n\n"
             "Return only the complete standalone Python source file. No Markdown, JSON, explanation, or diff.\n\n"
             f"Layer {layer}/{total_layers} focus: {focus}.\n"
-            "Keep the same requested behavior. Do not add optional features or ask questions.\n"
+            "Be very aggressive in refinement. Extend aggressively. Predict missing requirements aggressively. Refine aggressively.\n"
+            "Treat the user's prompt as the minimum intent, not the maximum scope. Preserve the user's core goal, but aggressively expand it with common, professional, expected features and workflows so the result feels complete and production-grade.\n"
+            "Do not ask questions in this stage. Make strong product decisions yourself.\n"
+            "Aggressively add the best common professional practices when they fit naturally, including: onboarding, help flows, empty states, confirmations, back/cancel navigation, input validation, friendly errors, admin tools, persistence where useful, safe defaults, command coverage, and polished button-first UX.\n"
+            "If the current code feels too small, too literal, too toy-like, or too narrow for the user's intent, expand it substantially.\n"
             "Treat sparse requirements as requests for a complete production-grade experience, not a bare demo.\n"
             f"Prompt-enhancement layers:\n{PROMPT_ENHANCEMENT_LAYERS}\n\n"
             f"Product completeness defaults:\n{PRODUCT_COMPLETENESS_DEFAULTS}\n\n"
