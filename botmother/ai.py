@@ -11,9 +11,19 @@ logger = logging.getLogger(__name__)
 
 
 MAX_FOLLOWUP_ROUNDS = 5
+MAX_JSON_REPAIR_ATTEMPTS = 2
+RUNTIME_PROVIDED_ENV = {
+    "BOT_TOKEN": "the child Telegram bot token from BotFather; BotMother injects this at launch",
+    "BOT_DB_PATH": "the child bot's SQLite database path; BotMother injects this at launch",
+    "PATH": "runtime executable search path",
+    "PYTHONUNBUFFERED": "runtime logging behavior",
+    "PYTHONIOENCODING": "runtime text encoding",
+}
+RESERVED_ENV_NAMES = set(RUNTIME_PROVIDED_ENV)
+RUNTIME_ENV_CONTRACT = "\n".join(f"- {name}: {description}" for name, description in RUNTIME_PROVIDED_ENV.items())
 
 
-SYSTEM_PROMPT = """You generate Telegram bot source code.
+SYSTEM_PROMPT = f"""You generate Telegram bot source code.
 
 Return only raw Python code. Do not use Markdown fences. Do not return JSON. Do not describe the code.
 
@@ -23,6 +33,8 @@ python bot.py
 Runtime contract:
 - Read the Telegram token from os.environ["BOT_TOKEN"].
 - Read the bot-specific SQLite path from os.environ["BOT_DB_PATH"].
+- BotMother already provides these runtime environment variables:
+{RUNTIME_ENV_CONTRACT}
 - You may use Python standard library, sqlite3, and python-telegram-bot.
 - Use polling, not webhooks.
 - Prefer python-telegram-bot async ApplicationBuilder.
@@ -64,6 +76,8 @@ Rules:
 - Use type "code" only when ready to generate a complete standalone bot.py.
 - Include env entries only for values the user explicitly provided in this conversation. Do not invent secrets.
 - If an external API key or config value is needed and not provided, ask for it.
+- Never include runtime-provided env names in env. They are already injected by BotMother: {", ".join(sorted(RESERVED_ENV_NAMES))}.
+- The generated code may read os.environ["BOT_TOKEN"] and os.environ["BOT_DB_PATH"], but the JSON env array must not set them.
 - When forced to generate, use reasonable defaults and do not ask more questions.
 """
 
@@ -72,7 +86,6 @@ FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 QUESTION_KEYS = {"id", "question", "suggestions"}
 ENV_KEYS = {"name", "value"}
 TOP_LEVEL_KEYS = {"type", "message", "questions", "code", "env"}
-RESERVED_ENV_NAMES = {"BOT_TOKEN", "BOT_DB_PATH", "PATH", "PYTHONUNBUFFERED", "PYTHONIOENCODING"}
 
 
 class AIResponseError(RuntimeError):
@@ -221,7 +234,7 @@ class GeminiCodeGenerator:
             raise RuntimeError("google-genai is not installed. Run: pip install -r requirements.txt") from exc
         self._client = genai.Client(api_key=self.api_key)
 
-    def _generate_json_decision(self, prompt: str) -> AIDecision:
+    def _generate_json_text(self, prompt: str) -> str:
         response = self._client.models.generate_content(
             model=self.model,
             contents=prompt,
@@ -233,10 +246,69 @@ class GeminiCodeGenerator:
         text = getattr(response, "text", None)
         if not text:
             logger.error("Gemini returned an empty JSON decision")
-            raise RuntimeError("Gemini returned an empty JSON decision.")
-        decision = parse_ai_decision(text)
-        logger.info("Gemini JSON decision: type=%s questions=%s code_chars=%s env=%s", decision.type, len(decision.questions), len(decision.code or ""), len(decision.env))
-        return decision
+            raise AIResponseError("Gemini returned an empty JSON decision.")
+        return text
+
+    def _build_json_repair_prompt(self, original_prompt: str, invalid_text: str, error: str, attempt: int) -> str:
+        return (
+            "Your previous response did not match BotMother's required JSON schema.\n"
+            f"Repair attempt {attempt}/{MAX_JSON_REPAIR_ATTEMPTS}.\n\n"
+            f"Validation error:\n{error}\n\n"
+            "Important runtime environment contract:\n"
+            f"{RUNTIME_ENV_CONTRACT}\n\n"
+            "Do not include any of those runtime-provided names in the JSON env array. "
+            "If your code needs the child bot token, read os.environ[\"BOT_TOKEN\"] in the Python code instead.\n\n"
+            "Original task context:\n"
+            f"{original_prompt}\n\n"
+            "Your invalid response was:\n"
+            f"{invalid_text.strip()[:6000]}\n\n"
+            "Return one corrected JSON object only. No Markdown and no prose outside JSON."
+        )
+
+    def _fallback_questions_after_bad_json(self, error: str) -> AIDecision:
+        logger.error("Gemini JSON decision remained invalid after repair attempts: %s", error)
+        return AIDecision(
+            "questions",
+            "I had trouble getting a valid AI plan. Please restate the request with any needed settings.",
+            (
+                AIQuestion(
+                    "clarify_request",
+                    "What should this bot do, and are there any extra API keys or settings besides the Telegram token?",
+                    ("No extra settings", "I will provide API keys in this chat"),
+                ),
+            ),
+            None,
+            (),
+        )
+
+    def _generate_json_decision(self, prompt: str) -> AIDecision:
+        current_prompt = prompt
+        last_error = "Unknown AI response error."
+        for attempt in range(MAX_JSON_REPAIR_ATTEMPTS + 1):
+            text = ""
+            try:
+                text = self._generate_json_text(current_prompt)
+                decision = parse_ai_decision(text)
+            except AIResponseError as exc:
+                last_error = str(exc)
+                if attempt >= MAX_JSON_REPAIR_ATTEMPTS:
+                    return self._fallback_questions_after_bad_json(last_error)
+                logger.warning(
+                    "Gemini JSON decision invalid; requesting repair: attempt=%s error=%s",
+                    attempt + 1,
+                    exc,
+                )
+                current_prompt = self._build_json_repair_prompt(prompt, text, last_error, attempt + 1)
+                continue
+            logger.info(
+                "Gemini JSON decision: type=%s questions=%s code_chars=%s env=%s",
+                decision.type,
+                len(decision.questions),
+                len(decision.code or ""),
+                len(decision.env),
+            )
+            return decision
+        return self._fallback_questions_after_bad_json(last_error)
 
     def decide_new_bot(self, user_prompt: str, answer_history: list[dict[str, Any]], force_code: bool = False) -> AIDecision:
         logger.info(
@@ -248,6 +320,8 @@ class GeminiCodeGenerator:
         )
         prompt = (
             "The user wants to create a new Telegram bot.\n\n"
+            "BotMother will collect the child BotFather token after this planning step and inject it as BOT_TOKEN at runtime. "
+            "Do not ask for the Telegram token and do not include BOT_TOKEN in env.\n\n"
             f"Original request:\n{user_prompt.strip()}\n\n"
             f"Follow-up history:\n{format_answer_history(answer_history)}\n\n"
             f"Force code now: {'yes' if force_code else 'no'}"
@@ -271,6 +345,8 @@ class GeminiCodeGenerator:
         )
         prompt = (
             "The user wants to edit an existing Telegram bot.\n\n"
+            "This child bot already has a Telegram token stored by BotMother, and BotMother injects it as BOT_TOKEN at runtime. "
+            "Do not ask for the Telegram token and do not include BOT_TOKEN in env.\n\n"
             "Current source code:\n"
             "```python\n"
             f"{current_code.strip()}\n"

@@ -89,6 +89,8 @@ Allowed dependencies for generated child code:
 
 If the AI asks for an external API key or config value, BotMother stores the supplied value as a per-bot environment variable and passes it to that child bot at runtime.
 
+BotMother always injects `BOT_TOKEN`, `BOT_DB_PATH`, `PATH`, `PYTHONUNBUFFERED`, and `PYTHONIOENCODING` itself. The AI planner is told not to include those names in generated env values; if it does anyway, BotMother asks Gemini to repair the JSON response with the validation error before continuing.
+
 ## Security Notes
 
 This is intentionally a testing-mode builder. Child tokens are stored plaintext in SQLite. Generated code is still dangerous by nature, so BotMother uses:
@@ -130,3 +132,5 @@ Use `/edit <id>`, then describe the change you want in normal language, for exam
 ## AI Follow-Ups
 
 For `/newbot` and `/edit`, BotMother asks Gemini for a strict JSON decision. The decision type is either `questions` or `code`. When the AI returns questions, BotMother asks the user and sends the answers back into the next AI turn. To avoid endless loops, BotMother allows up to 5 follow-up rounds, then forces a final code decision or ends the flow if the AI still cannot proceed safely.
+
+Planner JSON repair is also bounded. If Gemini returns invalid JSON or tries to set reserved runtime env vars such as `BOT_TOKEN`, BotMother sends the validation error back to Gemini for up to 2 repair attempts, then falls back to asking the user to restate the request.

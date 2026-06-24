@@ -1,6 +1,36 @@
 import unittest
 
-from botmother.ai import AIResponseError, parse_ai_decision
+from botmother.ai import AIResponseError, GeminiCodeGenerator, parse_ai_decision
+
+
+class FakeResponse:
+    def __init__(self, text):
+        self.text = text
+
+
+class FakeModels:
+    def __init__(self, texts):
+        self.texts = list(texts)
+        self.calls = []
+
+    def generate_content(self, **kwargs):
+        self.calls.append(kwargs)
+        if not self.texts:
+            raise AssertionError("No fake Gemini responses left.")
+        return FakeResponse(self.texts.pop(0))
+
+
+class FakeClient:
+    def __init__(self, texts):
+        self.models = FakeModels(texts)
+
+
+def make_generator(texts):
+    generator = GeminiCodeGenerator.__new__(GeminiCodeGenerator)
+    generator.api_key = "test"
+    generator.model = "test-model"
+    generator._client = FakeClient(texts)
+    return generator
 
 
 class AIDecisionTests(unittest.TestCase):
@@ -87,6 +117,55 @@ class AIDecisionTests(unittest.TestCase):
                 }
                 """
             )
+
+    def test_json_generation_repairs_reserved_runtime_env(self):
+        bad = """
+        {
+          "type": "code",
+          "message": "Ready.",
+          "questions": [],
+          "code": "import os\\nprint(os.environ['BOT_TOKEN'])",
+          "env": [{"name": "BOT_TOKEN", "value": "12345:bad"}]
+        }
+        """
+        fixed = """
+        {
+          "type": "code",
+          "message": "Ready.",
+          "questions": [],
+          "code": "import os\\nprint(os.environ['BOT_TOKEN'])",
+          "env": []
+        }
+        """
+        generator = make_generator([bad, fixed])
+
+        decision = generator._generate_json_decision("Original newbot prompt")
+
+        self.assertEqual(decision.type, "code")
+        self.assertEqual(decision.env, ())
+        self.assertEqual(len(generator._client.models.calls), 2)
+        repair_prompt = generator._client.models.calls[1]["contents"]
+        self.assertIn("Env var #1 uses reserved runtime name 'BOT_TOKEN'", repair_prompt)
+        self.assertIn("BOT_TOKEN", repair_prompt)
+        self.assertIn('os.environ["BOT_TOKEN"]', repair_prompt)
+
+    def test_json_generation_falls_back_after_repeated_bad_json(self):
+        bad = """
+        {
+          "type": "code",
+          "message": "Ready.",
+          "questions": [],
+          "code": "print('ok')",
+          "env": [{"name": "BOT_TOKEN", "value": "bad"}]
+        }
+        """
+        generator = make_generator([bad, bad, bad])
+
+        decision = generator._generate_json_decision("Original newbot prompt")
+
+        self.assertTrue(decision.needs_questions)
+        self.assertEqual(decision.questions[0].id, "clarify_request")
+        self.assertEqual(len(generator._client.models.calls), 3)
 
 
 if __name__ == "__main__":
