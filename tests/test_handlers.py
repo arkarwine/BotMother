@@ -7,6 +7,7 @@ from botmother.handlers import (
     format_bot_list,
     format_logs,
     compact_bot_label,
+    help_category_text,
     parse_ask_args,
     parse_bot_id,
     parse_tail_args,
@@ -65,7 +66,12 @@ class HandlerHelperTests(unittest.TestCase):
         self.assertIn("/ask", error)
 
     def test_format_empty_bot_list(self):
-        self.assertIn("/newbot", format_bot_list([]))
+        self.assertIn("New Bot", format_bot_list([]))
+
+    def test_help_category_text(self):
+        self.assertIn("Create", help_category_text("create"))
+        self.assertIn("Buttons", help_category_text("fallback"))
+        self.assertIn("BotMother", help_category_text("unknown"))
 
     def test_format_bot_list(self):
         text = format_bot_list([FakeRow(id=3, status="running", name="Echo")])

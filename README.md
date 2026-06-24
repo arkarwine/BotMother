@@ -57,24 +57,40 @@ PYTHON_BIN=/home/ubuntu/BotMother/.venv/bin/python
 
 `PYTHON_BIN=/home/ubuntu/BotMother/.venv/bin/python3` also works when that file exists. Check with `ls -l .venv/bin/python*`. If `PYTHON_BIN=python3`, install the Python dependencies into the system Python environment visible inside Bubblewrap.
 
-## Telegram Commands
+## Telegram Controls
 
-BotMother shows a persistent reply keyboard for common actions and inline buttons for bot-specific actions. Typed commands remain available as a fallback and for power users.
+BotMother is designed as a tap-first manager. The persistent keyboard contains the common actions, and BotMother opens inline bot pickers whenever an action needs a specific child bot. Users normally do not need to type bot IDs.
+
+Keyboard actions:
+
+- `🪄 New Bot` - create and launch a child bot; AI may ask follow-up questions first.
+- `📦 My Bots` - list your bots and open per-bot action buttons.
+- `📊 Status` - choose a bot and inspect process status.
+- `💬 Ask Bot` - choose a bot and ask AI about its prompt, source, env names, status, and recent logs.
+- `✏️ Edit Bot` - choose a bot and describe a change in normal language.
+- `♻️ Revise` - choose a bot and regenerate it from a fresh prompt.
+- `🧾 Logs` - choose a bot and view recent stdout/stderr.
+- `🔄 Restart`, `🛑 Stop`, `🗑️ Delete` - choose a bot, then run the operation.
+- `✨ Examples`, `🪪 My ID`, `🩺 Health`, `❔ Help`, `❌ Cancel` - open examples, IDs, health, category help, or leave the current flow.
+
+The Help button opens category menus with inline buttons for Create, Manage, Operations, Utilities, and command fallbacks.
+
+Typed commands remain available as a fallback and for power users:
 
 - `/start` - show basic help.
-- `/help`, `/commands`, `/usage` - show the full command guide.
+- `/help`, `/commands`, `/usage` - show the category help menu.
 - `/examples` - show copy-ready bot prompt examples.
-- `/newbot` - create and launch a child bot; AI may ask follow-up questions first.
+- `/newbot` - create and launch a child bot.
 - `/bots` - list your bots. Owners see all bots.
-- `/status [id]` - show one child bot status, or list your bots when no id is given.
-- `/tail <id> [lines]` - show recent stdout/stderr lines, default 30 and max 100.
-- `/logs <id> [lines]` - alias for `/tail`.
-- `/ask <id> [question]` - ask the AI about a child bot using its saved prompt, status, source, env names, and recent logs.
-- `/edit <id>` - describe a change in natural language; AI may ask follow-up questions first.
-- `/stop <id>` - stop one child bot.
-- `/restart <id>` - restart one child bot.
-- `/delete <id>` - stop and soft-delete one child bot.
-- `/revise <id>` - regenerate a child bot from a new prompt.
+- `/status [id]` - show one child bot status, or open the bot list when no id is given.
+- `/tail [id] [lines]` - show recent stdout/stderr lines, default 30 and max 100; opens a picker when no id is given.
+- `/logs [id] [lines]` - alias for `/tail`.
+- `/ask [id] [question]` - ask the AI about a child bot; opens a picker when no id is given.
+- `/edit [id]` - describe a change in natural language; opens a picker when no id is given.
+- `/stop [id]` - stop one child bot; opens a picker when no id is given.
+- `/restart [id]` - restart one child bot; opens a picker when no id is given.
+- `/delete [id]` - stop and soft-delete one child bot; opens a picker when no id is given.
+- `/revise [id]` - regenerate a child bot from a new prompt; opens a picker when no id is given.
 - `/id`, `/whoami` - show your Telegram user ID for admin configuration.
 - `/health` - show manager and child-process health summary.
 - `/killall` - owner-only emergency stop.
@@ -101,6 +117,7 @@ Generated child bots should prefer Telegram-native controls over command-heavy t
 
 - `ReplyKeyboardMarkup` for persistent main menus and common user actions.
 - `InlineKeyboardMarkup` for choices, confirmations, product/item selection, pagination, admin actions, and next-step navigation.
+- Avoid asking users to type IDs, option names, or command syntax when a button can represent the choice.
 - Slash commands should remain as fallback entry points, but primary workflows should be tappable.
 
 Generated child bots must register a global `application.add_error_handler(...)`. The validator rejects generated code that does not include one, so deployed bots have a fallback path for unexpected handler errors.
@@ -143,17 +160,17 @@ BotMother writes its own process logs to console and to `BOTMOTHER_LOG_FILE`, de
 tail -f ./data/botmother.log
 ```
 
-Child bot stdout/stderr is still available through `/tail <id>`, `/logs <id>`, and per-bot files under `data/bots/<id>/`.
+Child bot stdout/stderr is still available through the Logs keyboard button, `/tail`, `/logs`, and per-bot files under `data/bots/<id>/`.
 
 Negative child process return codes mean Linux signals. For example, `rc=-2` is `SIGINT`. BotMother logs signal names and will retry unexpected signal exits a bounded number of times.
 
 ## Prompt Editing
 
-Use `/edit <id>`, then describe the change you want in normal language, for example `add a /help command` or `make the bot remember birthdays`. BotMother lets the AI ask follow-up questions, edits the existing generated Python internally, validates the new revision, saves it, and restarts the child bot when the edit is valid.
+Tap `✏️ Edit Bot`, choose the bot, then describe the change you want in normal language, for example `add a help menu with buttons` or `make the bot remember birthdays`. BotMother lets the AI ask follow-up questions, edits the existing generated Python internally, validates the new revision, saves it, and restarts the child bot when the edit is valid.
 
 ## AI Follow-Ups
 
-For `/newbot` and `/edit`, BotMother asks Gemini for a strict JSON decision. The decision type is either `questions` or `code`. When the AI returns questions, BotMother sends Gemini's user-facing message directly, then sends the user's answer back into the next AI turn. The structured question fields are internal only, so BotMother does not add visible question numbers, suggestion labels, or follow-up counters. To avoid endless loops, BotMother allows up to 5 internal follow-up rounds, then forces a final code decision or ends the flow if the AI still cannot proceed safely.
+For New Bot and Edit Bot, BotMother asks Gemini for a strict JSON decision. The decision type is either `questions` or `code`. When the AI returns questions, BotMother sends Gemini's user-facing message directly, then sends the user's answer back into the next AI turn. The structured question fields are internal only, so BotMother does not add visible question numbers, suggestion labels, or follow-up counters. To avoid endless loops, BotMother allows up to 5 internal follow-up rounds, then forces a final code decision or ends the flow if the AI still cannot proceed safely.
 
 After the normal `/newbot` questions, BotMother runs a separate readiness check before asking for the BotFather token. This check asks only for missing essential data needed to run the bot, such as required admin IDs, API keys, payment/contact details, or external service settings. It does not ask optional preference questions and it never asks for the Telegram token.
 

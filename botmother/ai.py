@@ -42,7 +42,8 @@ Runtime contract:
 - Prefer Telegram-native UX over command-heavy text flows.
 - Use ReplyKeyboardMarkup for persistent main menus and common user actions.
 - Use InlineKeyboardMarkup for choices, confirmations, item selection, pagination, admin actions, and next-step navigation.
-- Keep slash commands as fallback entry points, but make primary workflows tappable with buttons.
+- Avoid asking users to type IDs, option names, or command syntax when a button can represent the choice.
+- Keep slash commands as fallback entry points, but make primary workflows tappable with buttons and short prompts.
 - Create needed SQLite tables yourself inside BOT_DB_PATH.
 - Keep the bot simple, robust, and friendly.
 - Every child bot must register a global error handler with application.add_error_handler.
@@ -108,7 +109,7 @@ Rules:
 - Do not expose raw source code unless the user explicitly asks for a tiny snippet.
 - Do not reveal tokens, env var values, or secrets.
 - If the answer needs more evidence than the context contains, say what is unknown.
-- If the user wants to change behavior, suggest using /edit <id> with the requested change.
+- If the user wants to change behavior, suggest tapping Edit Bot and describing the requested change.
 - Do not claim the bot can do something unless the context supports it.
 """
 
@@ -666,7 +667,8 @@ class GeminiCodeGenerator:
             "Keep the BotMother runtime contract: read BOT_TOKEN and BOT_DB_PATH from os.environ.\n"
             "Do not hardcode tokens or secrets. Do not require env vars except the provided names and BotMother runtime vars.\n"
             "Prefer Telegram-native buttons: ReplyKeyboardMarkup for main menus and InlineKeyboardMarkup for choices, confirmations, lists, pagination, and admin actions.\n"
-            "Keep slash commands as fallback, but make primary workflows tappable.\n"
+            "Avoid asking users to type IDs, option names, or command syntax when a button can represent the choice.\n"
+            "Keep slash commands as fallback, but make primary workflows tappable with short prompts.\n"
             "Ensure there is a global application.add_error_handler that logs exceptions and sends a friendly fallback message.\n"
             "Ensure Telegram formatting works safely: prefer ParseMode.HTML with html.escape for dynamic values, or escape MarkdownV2 dynamic values with escape_markdown.\n"
             "Keep using only Python standard library, sqlite3, and python-telegram-bot.\n"
