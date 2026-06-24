@@ -64,7 +64,7 @@ HELP_CATEGORY_TEXTS = {
     ),
     "utils": (
         "<b>🪪 Utilities</b>\n\n"
-        "<b>My ID</b> shows the Telegram ID to use for admin-only bot features.\n\n"
+        "<b>Profile</b> shows the Telegram username BotMother knows for you.\n\n"
         "<b>Health</b> shows the manager and child-process summary.\n\n"
         "<b>Examples</b> gives ready-to-edit prompt ideas."
     ),
@@ -133,23 +133,44 @@ def status_badge(status: str) -> str:
     return f"{STATUS_EMOJI.get(status, '•')} {status}"
 
 
+def row_value(row: Any, key: str, default: Any = None) -> Any:
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return default
+
+
+def owner_label(row: Any) -> str:
+    username = row_value(row, "owner_username")
+    if username:
+        return f"@{username}"
+    first_name = str(row_value(row, "owner_first_name", "") or "").strip()
+    last_name = str(row_value(row, "owner_last_name", "") or "").strip()
+    full_name = " ".join(part for part in (first_name, last_name) if part)
+    return full_name or "Owner"
+
+
+def bot_title(row: Any) -> str:
+    return str(row["name"])
+
+
 def format_bot_list(rows: list[Any]) -> str:
     if not rows:
         return "<b>🪄 No child bots yet</b>\n\nTap <b>New Bot</b> to create one, or open <b>Examples</b> for ideas."
     lines = ["<b>📦 Your Bots</b>", "", "Tap a bot to open actions.", ""]
     for row in rows:
-        lines.append(f"<code>#{row['id']}</code>  {escape(status_badge(row['status']))}  <b>{escape(str(row['name']))}</b>")
+        lines.append(
+            f"{escape(status_badge(row['status']))}  <b>{escape(bot_title(row))}</b>\n"
+            f"<i>{escape(owner_label(row))}</i>"
+        )
     return "\n".join(lines)
 
 
 def format_bot_status(row: Any) -> str:
-    pid = row["pid"] if row["pid"] is not None else "-"
     return (
-        f"<b>📦 Bot <code>#{row['id']}</code></b>\n\n"
-        f"<b>Name</b>\n{escape(str(row['name']))}\n\n"
+        f"<b>📦 {escape(bot_title(row))}</b>\n\n"
         f"<b>Status</b>\n{escape(status_badge(row['status']))}\n\n"
-        f"<b>PID</b>\n<code>{escape(str(pid))}</code>\n\n"
-        f"<b>Owner</b>\n<code>{escape(str(row['owner_user_id']))}</code>"
+        f"<b>Owner</b>\n{escape(owner_label(row))}"
     )
 
 
@@ -167,10 +188,10 @@ def format_logs(rows: list[Any]) -> str:
 
 
 def compact_bot_label(row: Any) -> str:
-    name = str(row["name"])
-    if len(name) > 24:
-        name = name[:21] + "..."
-    return f"#{row['id']} {STATUS_EMOJI.get(row['status'], '•')} {name}"
+    name = bot_title(row)
+    if len(name) > 34:
+        name = name[:31] + "..."
+    return f"{STATUS_EMOJI.get(row['status'], '•')} {name}"
 
 
 def help_category_text(category: str) -> str:
@@ -244,36 +265,29 @@ def build_application(token: str, db: Database, service: BotService):
 
     keyboard_button_pattern = (
         "^(🪄 New Bot|📦 My Bots|📊 Status|💬 Ask Bot|✏️ Edit Bot|♻️ Revise|🧾 Logs|🔄 Restart|🛑 Stop|"
-        "🗑️ Delete|✨ Examples|🪪 My ID|🩺 Health|❔ Help|❌ Cancel)$"
+        "🗑️ Delete|✨ Examples|🪪 Profile|🩺 Health|❔ Help|❌ Cancel)$"
     )
 
-    def reply_keyboard(rows: list[list[str]]):
-        return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
-
-    home_keyboard = reply_keyboard(
+    main_keyboard = ReplyKeyboardMarkup(
         [
-            ["🪄 New Bot", "📦 My Bots"],
-            ["✨ Examples", "❔ Help"],
-            ["🪪 My ID", "🩺 Health"],
-        ]
-    )
-    manage_keyboard = reply_keyboard(
-        [
-            ["📦 My Bots", "📊 Status", "🧾 Logs"],
+            ["🪄 New Bot", "📦 My Bots", "📊 Status"],
             ["💬 Ask Bot", "✏️ Edit Bot", "♻️ Revise"],
-            ["🔄 Restart", "🛑 Stop", "🗑️ Delete"],
-            ["🪄 New Bot", "❔ Help"],
-        ]
+            ["🧾 Logs", "🔄 Restart", "🛑 Stop"],
+            ["🗑️ Delete", "✨ Examples", "🪪 Profile"],
+            ["🩺 Health", "❔ Help", "❌ Cancel"],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
     )
-    flow_keyboard = reply_keyboard([["❌ Cancel"]])
 
     def keyboard_for_rows(rows: list[Any]):
-        return manage_keyboard if rows else home_keyboard
+        return main_keyboard
 
     def keyboard_for_user(user_id: int):
-        return keyboard_for_rows(service.list_bots_for(user_id))
+        return main_keyboard
 
-    main_keyboard = home_keyboard
+    flow_keyboard = main_keyboard
+    home_keyboard = main_keyboard
 
     def help_menu_keyboard():
         return InlineKeyboardMarkup(
@@ -297,7 +311,7 @@ def build_application(token: str, db: Database, service: BotService):
                     InlineKeyboardButton("🪄 New Bot", callback_data="nav:newbot"),
                     InlineKeyboardButton("✨ Examples", callback_data="nav:examples"),
                 ],
-                [InlineKeyboardButton("📚 Help Menu", callback_data="nav:help")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="nav:help")],
             ]
         elif category == "manage":
             rows = [
@@ -310,7 +324,7 @@ def build_application(token: str, db: Database, service: BotService):
                     InlineKeyboardButton("✏️ Edit Bot", callback_data="pick:edit"),
                 ],
                 [InlineKeyboardButton("♻️ Revise", callback_data="pick:revise")],
-                [InlineKeyboardButton("📚 Help Menu", callback_data="nav:help")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="nav:help")],
             ]
         elif category == "ops":
             rows = [
@@ -322,16 +336,16 @@ def build_application(token: str, db: Database, service: BotService):
                     InlineKeyboardButton("🛑 Stop", callback_data="pick:stop"),
                     InlineKeyboardButton("🗑️ Delete", callback_data="pick:delete_confirm"),
                 ],
-                [InlineKeyboardButton("📚 Help Menu", callback_data="nav:help")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="nav:help")],
             ]
         elif category == "utils":
             rows = [
                 [
-                    InlineKeyboardButton("🪪 My ID", callback_data="nav:id"),
+                    InlineKeyboardButton("🪪 Profile", callback_data="nav:id"),
                     InlineKeyboardButton("🩺 Health", callback_data="nav:health"),
                 ],
                 [InlineKeyboardButton("✨ Examples", callback_data="nav:examples")],
-                [InlineKeyboardButton("📚 Help Menu", callback_data="nav:help")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="nav:help")],
             ]
         elif category == "fallback":
             rows = [
@@ -356,14 +370,14 @@ def build_application(token: str, db: Database, service: BotService):
                     InlineKeyboardButton("🗑️ Delete", callback_data="pick:delete_confirm"),
                 ],
                 [
-                    InlineKeyboardButton("🪪 My ID", callback_data="nav:id"),
+                    InlineKeyboardButton("🪪 Profile", callback_data="nav:id"),
                     InlineKeyboardButton("🩺 Health", callback_data="nav:health"),
                 ],
                 [
                     InlineKeyboardButton("✨ Examples", callback_data="nav:examples"),
                     InlineKeyboardButton("❌ Cancel", callback_data="nav:cancel"),
                 ],
-                [InlineKeyboardButton("📚 Help Menu", callback_data="nav:help")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="nav:help")],
             ]
         else:
             rows = [
@@ -371,7 +385,7 @@ def build_application(token: str, db: Database, service: BotService):
                     InlineKeyboardButton("🪄 New Bot", callback_data="nav:newbot"),
                     InlineKeyboardButton("📦 My Bots", callback_data="nav:bots"),
                 ],
-                [InlineKeyboardButton("📚 Help Menu", callback_data="nav:help")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="nav:help")],
             ]
         return InlineKeyboardMarkup(rows)
 
@@ -403,15 +417,17 @@ def build_application(token: str, db: Database, service: BotService):
                     InlineKeyboardButton("🛑 Stop", callback_data=f"stop:{bot_id}"),
                 ],
                 [InlineKeyboardButton("🗑️ Delete", callback_data=f"delete_confirm:{bot_id}")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="nav:bots")],
             ]
         )
 
-    def bots_keyboard(rows: list[Any], action: str = "status"):
+    def bots_keyboard(rows: list[Any], action: str = "status", show_back: bool = False):
         if not rows:
             return empty_state_keyboard()
-        return InlineKeyboardMarkup(
-            [[InlineKeyboardButton(compact_bot_label(row), callback_data=f"{action}:{row['id']}")] for row in rows[:20]]
-        )
+        buttons = [[InlineKeyboardButton(compact_bot_label(row), callback_data=f"{action}:{row['id']}")] for row in rows[:20]]
+        if show_back:
+            buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="nav:bots")])
+        return InlineKeyboardMarkup(buttons)
 
     async def reply_html(message, text: str, reply_markup=None) -> None:
         await message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
@@ -443,12 +459,16 @@ def build_application(token: str, db: Database, service: BotService):
         user_id = _remember_user(db, update)
         chat_id = _chat_id(update)
         logger.info("Command /id: user_id=%s chat_id=%s", user_id, chat_id)
+        username = update.effective_user.username
+        display_name = " ".join(
+            part for part in (update.effective_user.first_name, update.effective_user.last_name) if part
+        ).strip()
+        public_name = f"@{username}" if username else display_name or "No username set"
         await reply_html(
             update.effective_message,
-            f"<b>🪪 Your Telegram ID</b>\n\n"
-            f"<b>User ID</b>\n<code>{user_id}</code>\n\n"
-            f"<b>Chat ID</b>\n<code>{chat_id}</code>\n\n"
-            "Use this as an admin ID when creating bots that need admin-only controls.",
+            f"<b>🪪 Your Telegram Profile</b>\n\n"
+            f"<b>Username</b>\n{escape(public_name)}\n\n"
+            "<i>BotMother keeps your numeric ID internally for access checks.</i>",
             reply_markup=keyboard_for_user(user_id),
         )
 
@@ -628,7 +648,7 @@ def build_application(token: str, db: Database, service: BotService):
         if row is None:
             await reply_html(update.effective_message, BOT_NOT_FOUND_TEXT)
             return
-        await reply_html(update.effective_message, format_bot_status(row), reply_markup=keyboard_for_user(user_id))
+        await reply_html(update.effective_message, format_bot_status(row), reply_markup=bot_actions_keyboard(bot_id))
 
     async def tail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
@@ -664,16 +684,21 @@ def build_application(token: str, db: Database, service: BotService):
         if not service.can_manage(user_id, bot_id):
             await reply_html(update.effective_message, BOT_NOT_FOUND_TEXT)
             return ConversationHandler.END
+        row = service.get_accessible_bot(user_id, bot_id)
+        if row is None:
+            await reply_html(update.effective_message, BOT_NOT_FOUND_TEXT)
+            return ConversationHandler.END
+        title = escape(bot_title(row))
         if question:
             return await answer_bot_question(update, context, user_id, bot_id, question)
         context.user_data["ask_bot_id"] = bot_id
         await reply_html(
             update.effective_message,
-            f"<b>💬 Ask Bot <code>#{bot_id}</code></b>\n\n"
+            f"<b>💬 Ask {title}</b>\n\n"
             "<b>Examples</b>\n\n"
-            f"• Why did bot <code>#{bot_id}</code> stop?\n"
-            f"• What commands does bot <code>#{bot_id}</code> support?\n"
-            f"• How should I edit bot <code>#{bot_id}</code> to add payments?",
+            "• Why did it stop?\n"
+            "• What commands does it support?\n"
+            "• How should I edit it to add payments?",
             reply_markup=flow_keyboard,
         )
         return ASK_PROMPT
@@ -719,7 +744,7 @@ def build_application(token: str, db: Database, service: BotService):
                 reply_markup=empty_state_keyboard(),
             )
             return
-        await reply_html(update.effective_message, f"<b>{escape(title)}</b>", reply_markup=bots_keyboard(rows, action))
+        await reply_html(update.effective_message, f"<b>{escape(title)}</b>", reply_markup=bots_keyboard(rows, action, show_back=True))
 
     async def button_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = (update.effective_message.text or "").strip()
@@ -741,7 +766,7 @@ def build_application(token: str, db: Database, service: BotService):
             await choose_bot_for_action(update, "stop", "🛑 Choose a bot to stop:")
         elif text == "🗑️ Delete":
             await choose_bot_for_action(update, "delete_confirm", "🗑️ Choose a bot to delete:")
-        elif text == "🪪 My ID":
+        elif text == "🪪 Profile":
             await identity(update, context)
         elif text == "🩺 Health":
             await health(update, context)
@@ -763,13 +788,14 @@ def build_application(token: str, db: Database, service: BotService):
             await query.answer()
         user_id = _remember_user(db, update)
         bot_id = int((query.data if query else "").split(":", 1)[1])
-        if not service.can_manage(user_id, bot_id):
+        row = service.get_accessible_bot(user_id, bot_id)
+        if row is None:
             await reply_html(update.effective_message, BOT_NOT_FOUND_TEXT)
             return ConversationHandler.END
         context.user_data["ask_bot_id"] = bot_id
         await reply_html(
             update.effective_message,
-            f"<b>💬 Ask Bot <code>#{bot_id}</code></b>\n\nWhat do you want to know?",
+            f"<b>💬 Ask {escape(bot_title(row))}</b>\n\nWhat do you want to know?",
             reply_markup=flow_keyboard,
         )
         return ASK_PROMPT
@@ -780,13 +806,14 @@ def build_application(token: str, db: Database, service: BotService):
             await query.answer()
         user_id = _remember_user(db, update)
         bot_id = int((query.data if query else "").split(":", 1)[1])
-        if not service.can_manage(user_id, bot_id):
+        row = service.get_accessible_bot(user_id, bot_id)
+        if row is None:
             await reply_html(update.effective_message, BOT_NOT_FOUND_TEXT)
             return ConversationHandler.END
         context.user_data["edit_bot_id"] = bot_id
         await reply_html(
             update.effective_message,
-            f"<b>✏️ Edit Bot <code>#{bot_id}</code></b>\n\nDescribe what you want to change.",
+            f"<b>✏️ Edit {escape(bot_title(row))}</b>\n\nDescribe what you want to change.",
             reply_markup=flow_keyboard,
         )
         return EDIT_PROMPT
@@ -797,13 +824,14 @@ def build_application(token: str, db: Database, service: BotService):
             await query.answer()
         user_id = _remember_user(db, update)
         bot_id = int((query.data if query else "").split(":", 1)[1])
-        if not service.can_manage(user_id, bot_id):
+        row = service.get_accessible_bot(user_id, bot_id)
+        if row is None:
             await reply_html(update.effective_message, BOT_NOT_FOUND_TEXT)
             return ConversationHandler.END
         context.user_data["revise_bot_id"] = bot_id
         await reply_html(
             update.effective_message,
-            f"<b>♻️ Revise Bot <code>#{bot_id}</code></b>\n\n"
+            f"<b>♻️ Revise {escape(bot_title(row))}</b>\n\n"
             "Describe the new complete version.\n\n"
             "<i>Use this when the bot should be rebuilt from a fresh prompt. For a smaller change, tap Edit.</i>",
             reply_markup=flow_keyboard,
@@ -831,12 +859,16 @@ def build_application(token: str, db: Database, service: BotService):
             await reply_html(update.effective_message, format_bot_list(rows), reply_markup=bots_keyboard(rows))
             return
         if data == "nav:id":
+            username = update.effective_user.username
+            display_name = " ".join(
+                part for part in (update.effective_user.first_name, update.effective_user.last_name) if part
+            ).strip()
+            public_name = f"@{username}" if username else display_name or "No username set"
             await reply_html(
                 update.effective_message,
-                f"<b>🪪 Your Telegram ID</b>\n\n"
-                f"<b>User ID</b>\n<code>{user_id}</code>\n\n"
-                f"<b>Chat ID</b>\n<code>{_chat_id(update)}</code>\n\n"
-                "Use this as an admin ID when a bot needs admin-only controls.",
+                f"<b>🪪 Your Telegram Profile</b>\n\n"
+                f"<b>Username</b>\n{escape(public_name)}\n\n"
+                "<i>BotMother keeps your numeric ID internally for access checks.</i>",
                 reply_markup=keyboard_for_user(user_id),
             )
             return
@@ -898,7 +930,7 @@ def build_application(token: str, db: Database, service: BotService):
 
         if action == "status":
             row = service.get_accessible_bot(user_id, bot_id)
-            await reply_html(update.effective_message, format_bot_status(row), reply_markup=keyboard_for_user(user_id))
+            await reply_html(update.effective_message, format_bot_status(row), reply_markup=bot_actions_keyboard(bot_id))
         elif action == "tail":
             await update.effective_message.reply_text(
                 f"<pre>{escape(format_logs(db.get_logs(bot_id, 50)))}</pre>",
@@ -912,14 +944,16 @@ def build_application(token: str, db: Database, service: BotService):
             result = await service.stop_bot(user_id, bot_id)
             await reply_result(update.effective_message, result.message, reply_markup=keyboard_for_user(user_id))
         elif action == "delete_confirm":
+            row = service.get_accessible_bot(user_id, bot_id)
+            title = escape(bot_title(row)) if row is not None else "this bot"
             await reply_html(
                 update.effective_message,
-                f"<b>🗑️ Delete Bot <code>#{bot_id}</code>?</b>\n\nThis stops it and frees its token.",
+                f"<b>🗑️ Delete {title}?</b>\n\nThis stops it and frees its token.",
                 reply_markup=InlineKeyboardMarkup(
                     [
                         [
                             InlineKeyboardButton("Yes, delete", callback_data=f"delete:{bot_id}"),
-                            InlineKeyboardButton("Cancel", callback_data=f"status:{bot_id}"),
+                            InlineKeyboardButton("⬅️ Back", callback_data=f"status:{bot_id}"),
                         ]
                     ]
                 ),
@@ -945,7 +979,9 @@ def build_application(token: str, db: Database, service: BotService):
 
         chunks = chunk_text(result.code)
         if len(chunks) > 1:
-            await reply_html(update.effective_message, f"<b>Source for Bot <code>#{bot_id}</code></b>\n\n{len(chunks)} parts")
+            row = service.get_accessible_bot(user_id, bot_id)
+            title = escape(bot_title(row)) if row is not None else "Bot Source"
+            await reply_html(update.effective_message, f"<b>Source for {title}</b>\n\n{len(chunks)} parts")
         for chunk in chunks:
             await update.effective_message.reply_text(
                 f"<pre>{escape(chunk)}</pre>",
@@ -998,10 +1034,14 @@ def build_application(token: str, db: Database, service: BotService):
         if not service.can_manage(user_id, bot_id):
             await reply_html(update.effective_message, BOT_NOT_FOUND_TEXT)
             return ConversationHandler.END
+        row = service.get_accessible_bot(user_id, bot_id)
+        if row is None:
+            await reply_html(update.effective_message, BOT_NOT_FOUND_TEXT)
+            return ConversationHandler.END
         context.user_data["revise_bot_id"] = bot_id
         await reply_html(
             update.effective_message,
-            f"<b>♻️ Revise Bot <code>#{bot_id}</code></b>\n\n"
+            f"<b>♻️ Revise {escape(bot_title(row))}</b>\n\n"
             "Send the new full prompt.\n\n"
             "<i>This regenerates the bot from scratch. For smaller changes, tap Edit instead.</i>",
             reply_markup=flow_keyboard,
@@ -1037,10 +1077,14 @@ def build_application(token: str, db: Database, service: BotService):
         if not service.can_manage(user_id, bot_id):
             await reply_html(update.effective_message, BOT_NOT_FOUND_TEXT)
             return ConversationHandler.END
+        row = service.get_accessible_bot(user_id, bot_id)
+        if row is None:
+            await reply_html(update.effective_message, BOT_NOT_FOUND_TEXT)
+            return ConversationHandler.END
         context.user_data["edit_bot_id"] = bot_id
         await reply_html(
             update.effective_message,
-            f"<b>✏️ Edit Bot <code>#{bot_id}</code></b>\n\n"
+            f"<b>✏️ Edit {escape(bot_title(row))}</b>\n\n"
             "Describe what you want to change.\n\n"
             "<b>Examples</b>\n\n"
             "• Add a help menu with examples\n"

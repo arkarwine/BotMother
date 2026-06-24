@@ -59,15 +59,9 @@ PYTHON_BIN=/home/ubuntu/BotMother/.venv/bin/python
 
 ## Telegram Controls
 
-BotMother is designed as a tap-first manager. The persistent keyboard changes with context, and BotMother opens inline bot pickers whenever an action needs a specific child bot. Users normally do not need to type bot IDs.
+BotMother is designed as a tap-first manager. The persistent keyboard contains the common actions, and BotMother opens inline bot pickers whenever an action needs a specific child bot. Users normally do not need to type bot IDs.
 
-Keyboard modes:
-
-- Home mode shows light navigation: `🪄 New Bot`, `📦 My Bots`, `✨ Examples`, `❔ Help`, `🪪 My ID`, and `🩺 Health`.
-- Management mode appears after bot-related actions and adds `📊 Status`, `💬 Ask Bot`, `✏️ Edit Bot`, `♻️ Revise`, `🧾 Logs`, `🔄 Restart`, `🛑 Stop`, and `🗑️ Delete`.
-- Active-flow mode appears while BotMother is waiting for a prompt, follow-up answer, token, edit, ask, or revision. It only shows `❌ Cancel` to avoid accidental button text being sent as a prompt.
-
-Common actions:
+Keyboard actions:
 
 - `🪄 New Bot` - create and launch a child bot; AI may ask follow-up questions first.
 - `📦 My Bots` - list your bots and open per-bot action buttons.
@@ -77,7 +71,7 @@ Common actions:
 - `♻️ Revise` - choose a bot and regenerate it from a fresh prompt.
 - `🧾 Logs` - choose a bot and view recent stdout/stderr.
 - `🔄 Restart`, `🛑 Stop`, `🗑️ Delete` - choose a bot, then run the operation.
-- `✨ Examples`, `🪪 My ID`, `🩺 Health`, `❔ Help`, `❌ Cancel` - open examples, IDs, health, category help, or leave the current flow when Cancel is visible.
+- `✨ Examples`, `🪪 Profile`, `🩺 Health`, `❔ Help`, `❌ Cancel` - open examples, username/profile info, health, category help, or leave the current flow.
 
 The Help button opens category menus with inline buttons for Create, Manage, Operations, Utilities, and command fallbacks.
 

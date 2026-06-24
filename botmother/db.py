@@ -146,14 +146,29 @@ class Database:
             return int(cur.lastrowid)
 
     def get_bot(self, bot_id: int, include_deleted: bool = False) -> sqlite3.Row | None:
-        where = "id = ?" if include_deleted else "id = ? AND deleted_at IS NULL"
+        where = "b.id = ?" if include_deleted else "b.id = ? AND b.deleted_at IS NULL"
         with self.session() as conn:
-            return conn.execute(f"SELECT * FROM bots WHERE {where}", (bot_id,)).fetchone()
+            return conn.execute(
+                f"""
+                SELECT b.*, u.username AS owner_username, u.first_name AS owner_first_name, u.last_name AS owner_last_name
+                FROM bots b
+                LEFT JOIN users u ON u.user_id = b.owner_user_id
+                WHERE {where}
+                """,
+                (bot_id,),
+            ).fetchone()
 
     def get_bot_by_token(self, token: str) -> sqlite3.Row | None:
         with self.session() as conn:
             return conn.execute(
-                "SELECT * FROM bots WHERE token = ? AND deleted_at IS NULL ORDER BY id DESC LIMIT 1",
+                """
+                SELECT b.*, u.username AS owner_username, u.first_name AS owner_first_name, u.last_name AS owner_last_name
+                FROM bots b
+                LEFT JOIN users u ON u.user_id = b.owner_user_id
+                WHERE b.token = ? AND b.deleted_at IS NULL
+                ORDER BY b.id DESC
+                LIMIT 1
+                """,
                 (token,),
             ).fetchone()
 
@@ -176,15 +191,21 @@ class Database:
         clauses = []
         params: list[Any] = []
         if owner_user_id is not None:
-            clauses.append("owner_user_id = ?")
+            clauses.append("b.owner_user_id = ?")
             params.append(owner_user_id)
         if not include_deleted:
-            clauses.append("deleted_at IS NULL")
+            clauses.append("b.deleted_at IS NULL")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self.session() as conn:
             return list(
                 conn.execute(
-                    f"SELECT * FROM bots {where} ORDER BY id DESC",
+                    f"""
+                    SELECT b.*, u.username AS owner_username, u.first_name AS owner_first_name, u.last_name AS owner_last_name
+                    FROM bots b
+                    LEFT JOIN users u ON u.user_id = b.owner_user_id
+                    {where}
+                    ORDER BY b.id DESC
+                    """,
                     params,
                 ).fetchall()
             )

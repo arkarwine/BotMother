@@ -74,15 +74,16 @@ class HandlerHelperTests(unittest.TestCase):
         self.assertIn("BotMother", help_category_text("unknown"))
 
     def test_format_bot_list(self):
-        text = format_bot_list([FakeRow(id=3, status="running", name="Echo")])
-        self.assertIn("#3", text)
+        text = format_bot_list([FakeRow(id=3, status="running", name="Echo", owner_username="alice")])
+        self.assertNotIn("#3", text)
+        self.assertIn("@alice", text)
         self.assertIn("running", text)
 
     def test_compact_bot_label_truncates_long_names(self):
         text = compact_bot_label(FakeRow(id=3, status="running", name="Very long bot name that should shrink"))
-        self.assertIn("#3", text)
+        self.assertNotIn("#3", text)
         self.assertIn("🟢", text)
-        self.assertLessEqual(len(text), 32)
+        self.assertLessEqual(len(text), 38)
 
     def test_format_logs(self):
         text = format_logs([FakeRow(stream="stderr", line="boom")])
