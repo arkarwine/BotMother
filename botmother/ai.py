@@ -58,3 +58,31 @@ class GeminiCodeGenerator:
             return text
         logger.error("Gemini returned an empty response")
         raise RuntimeError("Gemini returned an empty response.")
+
+    def edit_code(self, current_code: str, edit_prompt: str) -> str:
+        logger.info(
+            "Editing child bot code: model=%s code_chars=%s prompt_chars=%s",
+            self.model,
+            len(current_code),
+            len(edit_prompt),
+        )
+        prompt = (
+            "Modify the existing Telegram bot source code according to the user's request. "
+            "Return only the complete updated Python source file.\n\n"
+            "Current source code:\n"
+            "```python\n"
+            f"{current_code.strip()}\n"
+            "```\n\n"
+            f"User edit request:\n{edit_prompt.strip()}"
+        )
+        response = self._client.models.generate_content(
+            model=self.model,
+            contents=prompt,
+            config={"system_instruction": SYSTEM_PROMPT},
+        )
+        text = getattr(response, "text", None)
+        if text:
+            logger.info("Gemini returned edited code: chars=%s", len(text))
+            return text
+        logger.error("Gemini returned an empty edit response")
+        raise RuntimeError("Gemini returned an empty edit response.")

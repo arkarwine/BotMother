@@ -11,7 +11,7 @@ from .service import BotService
 logger = logging.getLogger(__name__)
 
 
-NEW_PROMPT, NEW_TOKEN, REVISE_PROMPT, EDIT_CODE = range(4)
+NEW_PROMPT, NEW_TOKEN, REVISE_PROMPT, EDIT_PROMPT = range(4)
 
 
 def parse_bot_id(args: list[str]) -> int | None:
@@ -119,7 +119,7 @@ def build_application(token: str, db: Database, service: BotService):
             "Use /newbot to build a child bot.\n"
             "Use /bots to list your bots.\n"
             "Use /tail <id> to see child bot logs.\n"
-            "Use /source <id> and /edit <id> to edit raw code."
+            "Use /edit <id> to change a bot with a prompt."
         )
 
     async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -203,6 +203,9 @@ def build_application(token: str, db: Database, service: BotService):
         user_id = _remember_user(db, update)
         bot_id = parse_bot_id(context.args)
         logger.info("Command /source: user_id=%s bot_id=%s", user_id, bot_id)
+        if not service.is_owner(user_id):
+            await update.effective_message.reply_text("Raw source is owner-only. Use /edit <id> to change bots with a prompt.")
+            return
         if bot_id is None:
             await update.effective_message.reply_text("Usage: /source <id>")
             return
@@ -297,20 +300,20 @@ def build_application(token: str, db: Database, service: BotService):
             return ConversationHandler.END
         context.user_data["edit_bot_id"] = bot_id
         await update.effective_message.reply_text(
-            "Paste the complete replacement bot.py source code. "
-            "Markdown code fences are okay. Use /cancel to abort."
+            "Describe what you want to change. "
+            "Example: add a /help command, or make the bot remember birthdays. Use /cancel to abort."
         )
-        return EDIT_CODE
+        return EDIT_PROMPT
 
-    async def edit_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    async def edit_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         user_id = _remember_user(db, update)
         bot_id = int(context.user_data["edit_bot_id"])
-        code = (update.effective_message.text or "").strip()
-        if not code:
-            await update.effective_message.reply_text("Paste the complete replacement Python code.")
-            return EDIT_CODE
-        await update.effective_message.reply_text("Validating edited code and restarting the child bot...")
-        result = await service.edit_bot_code(user_id, bot_id, code)
+        prompt = (update.effective_message.text or "").strip()
+        if not prompt:
+            await update.effective_message.reply_text("Describe the change you want.")
+            return EDIT_PROMPT
+        await update.effective_message.reply_text("Editing with AI, validating, and restarting the child bot...")
+        result = await service.edit_bot_with_prompt(user_id, bot_id, prompt)
         logger.info("Edit bot result: user_id=%s bot_id=%s ok=%s", user_id, bot_id, result.ok)
         await update.effective_message.reply_text(result.message)
         context.user_data.pop("edit_bot_id", None)
@@ -325,8 +328,7 @@ def build_application(token: str, db: Database, service: BotService):
                 BotCommand("bots", "List your child bots"),
                 BotCommand("status", "Show bot status, or list all bots"),
                 BotCommand("tail", "Show child bot logs"),
-                BotCommand("source", "Show raw child bot code"),
-                BotCommand("edit", "Replace raw child bot code"),
+                BotCommand("edit", "Change a child bot with a prompt"),
                 BotCommand("delete", "Stop and delete a child bot"),
                 BotCommand("stop", "Stop a child bot"),
                 BotCommand("restart", "Restart a child bot"),
@@ -370,7 +372,7 @@ def build_application(token: str, db: Database, service: BotService):
     edit_conv = ConversationHandler(
         entry_points=[CommandHandler("edit", edit)],
         states={
-            EDIT_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_code)],
+            EDIT_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_prompt)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )

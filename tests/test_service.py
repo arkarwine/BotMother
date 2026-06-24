@@ -23,6 +23,18 @@ class FakeRunner:
         self.active.pop(bot_id, None)
 
 
+class FakeGenerator:
+    def __init__(self, edited_code: str):
+        self.edited_code = edited_code
+        self.current_code = None
+        self.edit_prompt = None
+
+    def edit_code(self, current_code: str, edit_prompt: str) -> str:
+        self.current_code = current_code
+        self.edit_prompt = edit_prompt
+        return self.edited_code
+
+
 def make_settings(tmp: str) -> Settings:
     return Settings(
         mother_bot_token="11111:mother_token_abcdefghijklmnopqrstuvwxyz",
@@ -37,7 +49,7 @@ def make_settings(tmp: str) -> Settings:
     )
 
 
-def make_service(tmp: str):
+def make_service(tmp: str, edited_code: str = "print('new')"):
     settings = make_settings(tmp)
     db = Database(settings.db_path)
     db.initialize()
@@ -52,38 +64,41 @@ def make_service(tmp: str):
     )
     db.add_revision(bot_id, "make echo", "print('old')", "ok", None)
     runner = FakeRunner()
-    return BotService(settings, db, object(), runner), db, runner, bot_id
+    generator = FakeGenerator(edited_code)
+    return BotService(settings, db, generator, runner), db, runner, generator, bot_id
 
 
 class ServiceEditTests(unittest.TestCase):
-    def test_invalid_manual_edit_does_not_stop_running_bot(self):
+    def test_invalid_prompt_edit_does_not_stop_running_bot(self):
         with tempfile.TemporaryDirectory() as tmp:
-            service, db, runner, bot_id = make_service(tmp)
+            service, db, runner, _, bot_id = make_service(tmp, edited_code="import subprocess\n")
             runner.active[bot_id] = object()
 
-            result = asyncio.run(service.edit_bot_code(1, bot_id, "import subprocess\n"))
+            result = asyncio.run(service.edit_bot_with_prompt(1, bot_id, "add shell command support"))
 
             self.assertFalse(result.ok)
             self.assertEqual(runner.stop_count, 0)
             self.assertIn(bot_id, runner.active)
             self.assertEqual(db.latest_revision(bot_id)["validation_status"], "failed")
 
-    def test_valid_manual_edit_restarts_running_bot(self):
+    def test_valid_prompt_edit_restarts_running_bot(self):
         with tempfile.TemporaryDirectory() as tmp:
-            service, db, runner, bot_id = make_service(tmp)
+            service, db, runner, generator, bot_id = make_service(tmp, edited_code="print('new')")
             runner.active[bot_id] = object()
 
-            result = asyncio.run(service.edit_bot_code(1, bot_id, "print('new')"))
+            result = asyncio.run(service.edit_bot_with_prompt(1, bot_id, "make it friendlier"))
 
             self.assertTrue(result.ok, result.message)
             self.assertEqual(runner.stop_count, 1)
             self.assertEqual(runner.start_count, 1)
             self.assertIn(bot_id, runner.active)
             self.assertEqual(db.latest_revision(bot_id)["code"], "print('new')")
+            self.assertEqual(generator.current_code, "print('old')")
+            self.assertEqual(generator.edit_prompt, "make it friendlier")
 
     def test_get_source_returns_latest_revision(self):
         with tempfile.TemporaryDirectory() as tmp:
-            service, _, _, bot_id = make_service(tmp)
+            service, _, _, _, bot_id = make_service(tmp)
 
             result = service.get_source(1, bot_id)
 
@@ -93,4 +108,3 @@ class ServiceEditTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

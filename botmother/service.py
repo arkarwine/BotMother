@@ -130,32 +130,38 @@ class BotService:
         logger.info("Bot revised and running: bot_id=%s user_id=%s", bot_id, user_id)
         return OperationResult(True, f"Bot #{bot_id} revised and running.", bot_id)
 
-    async def edit_bot_code(self, user_id: int, bot_id: int, raw_code: str) -> OperationResult:
+    async def edit_bot_with_prompt(self, user_id: int, bot_id: int, edit_prompt: str) -> OperationResult:
         if not self.can_manage(user_id, bot_id):
             logger.info("Denied edit: user_id=%s bot_id=%s", user_id, bot_id)
             return OperationResult(False, "Bot not found, or you do not have access.")
 
-        code = extract_python_code(raw_code)
+        existing_revision = self.db.latest_revision(bot_id)
+        if existing_revision is None or not existing_revision["code"]:
+            return OperationResult(False, f"Bot #{bot_id} has no saved source to edit.", bot_id)
+
+        logger.info("Generating prompt edit: bot_id=%s user_id=%s prompt_chars=%s", bot_id, user_id, len(edit_prompt))
+        raw = self.generator.edit_code(existing_revision["code"], edit_prompt)
+        code = extract_python_code(raw)
         validation = validate_generated_code(code)
         if not validation.ok:
-            logger.warning("Manual edit failed validation: bot_id=%s error=%s", bot_id, validation.error)
-            self.db.add_revision(bot_id, "Manual edit", code, "failed", validation.error)
-            return OperationResult(False, f"Edited code for bot #{bot_id} was rejected: {validation.error}", bot_id)
+            logger.warning("Prompt edit failed validation: bot_id=%s error=%s", bot_id, validation.error)
+            self.db.add_revision(bot_id, f"Edit: {edit_prompt}", code, "failed", validation.error)
+            return OperationResult(False, f"Edited bot #{bot_id} was rejected: {validation.error}", bot_id)
 
         was_running = bot_id in self.runner.active
-        logger.info("Applying manual edit: bot_id=%s user_id=%s was_running=%s code_chars=%s", bot_id, user_id, was_running, len(code))
+        logger.info("Applying prompt edit: bot_id=%s user_id=%s was_running=%s code_chars=%s", bot_id, user_id, was_running, len(code))
         if was_running:
             await self.runner.stop_bot(bot_id, mark_stopped=False)
 
-        self.db.add_revision(bot_id, "Manual edit", code, "ok", None)
+        self.db.add_revision(bot_id, f"Edit: {edit_prompt}", code, "ok", None)
         self.db.update_bot_status(bot_id, "ready")
         try:
             await self.runner.start_bot(bot_id)
         except Exception as exc:
-            logger.exception("Launch failed after manual edit: bot_id=%s", bot_id)
+            logger.exception("Launch failed after prompt edit: bot_id=%s", bot_id)
             self.db.update_bot_status(bot_id, "launch_failed")
-            self.db.add_log(bot_id, "system", f"Launch failed after manual edit: {exc}", self.settings.log_tail_rows)
-            return OperationResult(False, f"Manual edit saved for bot #{bot_id}, but launch failed: {exc}", bot_id)
+            self.db.add_log(bot_id, "system", f"Launch failed after prompt edit: {exc}", self.settings.log_tail_rows)
+            return OperationResult(False, f"Edit saved for bot #{bot_id}, but launch failed: {exc}", bot_id)
 
         return OperationResult(True, f"Bot #{bot_id} edited and running.", bot_id)
 
