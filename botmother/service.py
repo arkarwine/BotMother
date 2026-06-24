@@ -135,10 +135,10 @@ class BotService:
         token = token.strip()
         if not is_valid_telegram_token(token):
             logger.info("Rejected invalid child token: user_id=%s chat_id=%s", user_id, chat_id)
-            return OperationResult(False, "That does not look like a Telegram bot token.")
+            return OperationResult(False, "🔐 That does not look like a Telegram bot token.\nPaste the child token from @BotFather, for example 123456789:AA....")
         if token == self.settings.mother_bot_token:
             logger.warning("Rejected mother token as child token: user_id=%s chat_id=%s", user_id, chat_id)
-            return OperationResult(False, "That token belongs to the mother bot. Create a separate child bot in BotFather.")
+            return OperationResult(False, "🔐 That token belongs to the mother bot.\nCreate a separate child bot in @BotFather, then paste that child token here.")
 
         released = self.db.release_deleted_token(token)
         if released:
@@ -148,8 +148,8 @@ class BotService:
         if existing is not None:
             logger.info("Rejected duplicate child token: user_id=%s existing_bot_id=%s", user_id, existing["id"])
             if self.is_owner(user_id) or int(existing["owner_user_id"]) == user_id:
-                return OperationResult(False, f"That token is already attached to bot #{existing['id']}.")
-            return OperationResult(False, "That token is already attached to another active bot.")
+                return OperationResult(False, f"🔁 That token is already attached to bot #{existing['id']}.\nUse /status {existing['id']} or /restart {existing['id']}.")
+            return OperationResult(False, "🔁 That token is already attached to another active bot.")
 
         raw_code = self._refine_code_for_deploy(prompt, raw_code, env_vars or {})
         code = extract_python_code(raw_code)
@@ -177,15 +177,15 @@ class BotService:
             logger.exception("Launch failed: bot_id=%s", bot_id)
             self.db.update_bot_status(bot_id, "launch_failed")
             self.db.add_log(bot_id, "system", f"Launch failed: {exc}", self.settings.log_tail_rows)
-            return OperationResult(False, f"Generated bot #{bot_id}, but launch failed: {exc}", bot_id)
+            return OperationResult(False, f"⚠️ Generated bot #{bot_id}, but launch failed: {exc}\nCheck /tail {bot_id} 80, then try /restart {bot_id}.", bot_id)
 
         logger.info("Bot running: bot_id=%s user_id=%s", bot_id, user_id)
-        return OperationResult(True, f"Bot #{bot_id} is running. Token: {mask_token(token)}", bot_id)
+        return OperationResult(True, f"✅ Bot #{bot_id} is running.\nToken: {mask_token(token)}\nNext: /status {bot_id} • /tail {bot_id} 50 • /ask {bot_id} what can it do?", bot_id)
 
     async def revise_bot(self, user_id: int, bot_id: int, prompt: str) -> OperationResult:
         if not self.can_manage(user_id, bot_id):
             logger.info("Denied revise: user_id=%s bot_id=%s", user_id, bot_id)
-            return OperationResult(False, "Bot not found, or you do not have access.")
+            return OperationResult(False, "🔎 Bot not found, or you do not have access.")
 
         was_running = bot_id in self.runner.active
         logger.info("Revising bot: bot_id=%s user_id=%s was_running=%s", bot_id, user_id, was_running)
@@ -205,10 +205,10 @@ class BotService:
             logger.exception("Launch failed after revise: bot_id=%s", bot_id)
             self.db.update_bot_status(bot_id, "launch_failed")
             self.db.add_log(bot_id, "system", f"Launch failed after revise: {exc}", self.settings.log_tail_rows)
-            return OperationResult(False, f"Revision saved for bot #{bot_id}, but launch failed: {exc}", bot_id)
+            return OperationResult(False, f"⚠️ Revision saved for bot #{bot_id}, but launch failed: {exc}\nCheck /tail {bot_id} 80.", bot_id)
 
         logger.info("Bot revised and running: bot_id=%s user_id=%s", bot_id, user_id)
-        return OperationResult(True, f"Bot #{bot_id} revised and running.", bot_id)
+        return OperationResult(True, f"✅ Bot #{bot_id} revised and running.\nUse /tail {bot_id} 50 or /ask {bot_id} what changed?", bot_id)
 
     async def edit_bot_with_prompt(self, user_id: int, bot_id: int, edit_prompt: str) -> OperationResult:
         plan = self.plan_edit_bot(user_id, bot_id, edit_prompt, [], force_code=True)
@@ -225,10 +225,10 @@ class BotService:
     ) -> OperationResult:
         if not self.can_manage(user_id, bot_id):
             logger.info("Denied edit: user_id=%s bot_id=%s", user_id, bot_id)
-            return OperationResult(False, "Bot not found, or you do not have access.")
+            return OperationResult(False, "🔎 Bot not found, or you do not have access.")
 
         if decision.type != "code" or not decision.code:
-            return OperationResult(False, "AI did not provide edited code yet.", bot_id)
+            return OperationResult(False, "🧠 AI did not provide edited code yet.", bot_id)
 
         env_vars = self._env_dict(decision)
         existing_env_vars = self.db.get_bot_env_vars(bot_id)
@@ -239,7 +239,7 @@ class BotService:
         if not validation.ok:
             logger.warning("Prompt edit failed validation: bot_id=%s error=%s", bot_id, validation.error)
             self.db.add_revision(bot_id, f"Edit: {edit_prompt}", code, "failed", validation.error)
-            return OperationResult(False, f"Edited bot #{bot_id} was rejected: {validation.error}", bot_id)
+            return OperationResult(False, f"⚠️ Edited bot #{bot_id} was rejected: {validation.error}\nThe running bot was left unchanged.", bot_id)
 
         was_running = bot_id in self.runner.active
         logger.info("Applying prompt edit: bot_id=%s user_id=%s was_running=%s code_chars=%s", bot_id, user_id, was_running, len(code))
@@ -257,47 +257,47 @@ class BotService:
             logger.exception("Launch failed after prompt edit: bot_id=%s", bot_id)
             self.db.update_bot_status(bot_id, "launch_failed")
             self.db.add_log(bot_id, "system", f"Launch failed after prompt edit: {exc}", self.settings.log_tail_rows)
-            return OperationResult(False, f"Edit saved for bot #{bot_id}, but launch failed: {exc}", bot_id)
+            return OperationResult(False, f"⚠️ Edit saved for bot #{bot_id}, but launch failed: {exc}\nCheck /tail {bot_id} 80.", bot_id)
 
-        return OperationResult(True, f"Bot #{bot_id} edited and running.", bot_id)
+        return OperationResult(True, f"✅ Bot #{bot_id} edited and running.\nUse /tail {bot_id} 50 or /ask {bot_id} what changed?", bot_id)
 
     async def stop_bot(self, user_id: int, bot_id: int) -> OperationResult:
         if not self.can_manage(user_id, bot_id):
             logger.info("Denied stop: user_id=%s bot_id=%s", user_id, bot_id)
-            return OperationResult(False, "Bot not found, or you do not have access.")
+            return OperationResult(False, "🔎 Bot not found, or you do not have access.")
         logger.info("Stopping bot by request: bot_id=%s user_id=%s", bot_id, user_id)
         await self.runner.stop_bot(bot_id)
-        return OperationResult(True, f"Bot #{bot_id} stopped.", bot_id)
+        return OperationResult(True, f"🛑 Bot #{bot_id} stopped.\nRestart it with /restart {bot_id}.", bot_id)
 
     async def restart_bot(self, user_id: int, bot_id: int) -> OperationResult:
         if not self.can_manage(user_id, bot_id):
             logger.info("Denied restart: user_id=%s bot_id=%s", user_id, bot_id)
-            return OperationResult(False, "Bot not found, or you do not have access.")
+            return OperationResult(False, "🔎 Bot not found, or you do not have access.")
         try:
             logger.info("Restarting bot by request: bot_id=%s user_id=%s", bot_id, user_id)
             await self.runner.restart_bot(bot_id)
         except Exception as exc:
             logger.exception("Restart failed: bot_id=%s user_id=%s", bot_id, user_id)
             self.db.update_bot_status(bot_id, "launch_failed")
-            return OperationResult(False, f"Restart failed for bot #{bot_id}: {exc}", bot_id)
-        return OperationResult(True, f"Bot #{bot_id} restarted.", bot_id)
+            return OperationResult(False, f"⚠️ Restart failed for bot #{bot_id}: {exc}\nCheck /tail {bot_id} 80.", bot_id)
+        return OperationResult(True, f"🔄 Bot #{bot_id} restarted.\nUse /tail {bot_id} 50 to watch it.", bot_id)
 
     async def delete_bot(self, user_id: int, bot_id: int) -> OperationResult:
         if not self.can_manage(user_id, bot_id):
             logger.info("Denied delete: user_id=%s bot_id=%s", user_id, bot_id)
-            return OperationResult(False, "Bot not found, or you do not have access.")
+            return OperationResult(False, "🔎 Bot not found, or you do not have access.")
         logger.info("Deleting bot by request: bot_id=%s user_id=%s", bot_id, user_id)
         await self.runner.stop_bot(bot_id, mark_stopped=False)
         self.db.soft_delete_bot(bot_id)
-        return OperationResult(True, f"Bot #{bot_id} deleted.", bot_id)
+        return OperationResult(True, f"🗑️ Bot #{bot_id} deleted.\nIts token can now be reused for a new bot.", bot_id)
 
     async def kill_all(self, user_id: int) -> OperationResult:
         if not self.is_owner(user_id):
             logger.warning("Denied killall for non-owner: user_id=%s", user_id)
-            return OperationResult(False, "Only owners can use /killall.")
+            return OperationResult(False, "🔒 Only owners can use /killall.")
         logger.warning("Owner requested killall: user_id=%s active_count=%s", user_id, len(self.runner.active))
         await self.runner.stop_all(mark_stopped=True)
-        return OperationResult(True, "All active child bots were stopped.")
+        return OperationResult(True, "🛑 All active child bots were stopped.")
 
     def list_bots_for(self, user_id: int):
         if self.is_owner(user_id):

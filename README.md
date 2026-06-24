@@ -10,7 +10,8 @@ The generated child bot is raw standalone Python. There is no user-facing schema
 - Users provide child bot tokens from `@BotFather`.
 - Gemini code generation with `gemini-3.1-flash-lite`.
 - SQLite state for users, bots, revisions, and recent logs.
-- Commands for create, AI-guided prompt edit, ask, start, stop, restart, delete, status, and tail/logs.
+- Commands for create, examples/help, AI-guided prompt edit, ask, start, stop, restart, delete, status, identity, health, and tail/logs.
+- Button-first manager UX with a persistent reply keyboard and inline bot action buttons.
 - AI can ask follow-up questions before creating or editing a bot.
 - AI runs a final essential-data readiness check before asking for the child bot token.
 - AI runs several raw-Python refinement passes before deployment.
@@ -58,7 +59,11 @@ PYTHON_BIN=/home/ubuntu/BotMother/.venv/bin/python
 
 ## Telegram Commands
 
+BotMother shows a persistent reply keyboard for common actions and inline buttons for bot-specific actions. Typed commands remain available as a fallback and for power users.
+
 - `/start` - show basic help.
+- `/help`, `/commands`, `/usage` - show the full command guide.
+- `/examples` - show copy-ready bot prompt examples.
 - `/newbot` - create and launch a child bot; AI may ask follow-up questions first.
 - `/bots` - list your bots. Owners see all bots.
 - `/status [id]` - show one child bot status, or list your bots when no id is given.
@@ -70,6 +75,8 @@ PYTHON_BIN=/home/ubuntu/BotMother/.venv/bin/python
 - `/restart <id>` - restart one child bot.
 - `/delete <id>` - stop and soft-delete one child bot.
 - `/revise <id>` - regenerate a child bot from a new prompt.
+- `/id`, `/whoami` - show your Telegram user ID for admin configuration.
+- `/health` - show manager and child-process health summary.
 - `/killall` - owner-only emergency stop.
 - `/cancel` - cancel an active create/revise flow.
 
@@ -89,6 +96,16 @@ Allowed dependencies for generated child code:
 - Python standard library
 - `sqlite3`
 - `python-telegram-bot`
+
+Generated child bots should prefer Telegram-native controls over command-heavy text flows:
+
+- `ReplyKeyboardMarkup` for persistent main menus and common user actions.
+- `InlineKeyboardMarkup` for choices, confirmations, product/item selection, pagination, admin actions, and next-step navigation.
+- Slash commands should remain as fallback entry points, but primary workflows should be tappable.
+
+Generated child bots must register a global `application.add_error_handler(...)`. The validator rejects generated code that does not include one, so deployed bots have a fallback path for unexpected handler errors.
+
+For Telegram formatting, generated bots should prefer `ParseMode.HTML` and escape dynamic values with `html.escape`. If a child bot uses MarkdownV2, it must escape dynamic values with `telegram.helpers.escape_markdown(value, version=2)`. This avoids broken Telegram Markdown/HTML rendering from unescaped user content.
 
 If the AI asks for an external API key or config value, BotMother stores the supplied value as a per-bot environment variable and passes it to that child bot at runtime.
 

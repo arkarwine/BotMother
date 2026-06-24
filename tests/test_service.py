@@ -9,6 +9,27 @@ from botmother.db import Database
 from botmother.service import BotService
 
 
+OLD_BOT_CODE = """async def error_handler(update, context):
+    pass
+
+def main():
+    application = object()
+    application.add_error_handler(error_handler)
+
+VALUE = 'old'
+"""
+
+NEW_BOT_CODE = """async def error_handler(update, context):
+    pass
+
+def main():
+    application = object()
+    application.add_error_handler(error_handler)
+
+VALUE = 'new'
+"""
+
+
 class FakeRunner:
     def __init__(self):
         self.active = {}
@@ -89,7 +110,7 @@ def make_settings(tmp: str) -> Settings:
     )
 
 
-def make_service(tmp: str, edited_code: str = "print('new')", env=None):
+def make_service(tmp: str, edited_code: str = NEW_BOT_CODE, env=None):
     settings = make_settings(tmp)
     db = Database(settings.db_path)
     db.initialize()
@@ -102,7 +123,7 @@ def make_service(tmp: str, edited_code: str = "print('new')", env=None):
         "12345:abcdefghijklmnopqrstuvwxyzABCDE",
         settings.workdir / "1",
     )
-    db.add_revision(bot_id, "make echo", "print('old')", "ok", None)
+    db.add_revision(bot_id, "make echo", OLD_BOT_CODE, "ok", None)
     runner = FakeRunner()
     generator = FakeGenerator(edited_code, env=env)
     return BotService(settings, db, generator, runner), db, runner, generator, bot_id
@@ -124,7 +145,7 @@ class ServiceEditTests(unittest.TestCase):
     def test_valid_prompt_edit_restarts_running_bot(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = [AIEnvVar("WEATHER_API_KEY", "secret")]
-            service, db, runner, generator, bot_id = make_service(tmp, edited_code="print('new')", env=env)
+            service, db, runner, generator, bot_id = make_service(tmp, edited_code=NEW_BOT_CODE, env=env)
             runner.active[bot_id] = object()
 
             result = asyncio.run(service.edit_bot_with_prompt(1, bot_id, "make it friendlier"))
@@ -133,9 +154,9 @@ class ServiceEditTests(unittest.TestCase):
             self.assertEqual(runner.stop_count, 1)
             self.assertEqual(runner.start_count, 1)
             self.assertIn(bot_id, runner.active)
-            self.assertEqual(db.latest_revision(bot_id)["code"], "print('new')")
+            self.assertEqual(db.latest_revision(bot_id)["code"], NEW_BOT_CODE.strip())
             self.assertEqual(db.get_bot_env_vars(bot_id), {"WEATHER_API_KEY": "secret"})
-            self.assertEqual(generator.current_code, "print('old')")
+            self.assertEqual(generator.current_code, OLD_BOT_CODE)
             self.assertEqual(generator.edit_prompt, "make it friendlier")
             self.assertEqual(len(generator.refinement_calls), 3)
             self.assertEqual(generator.refinement_calls[0]["env_names"], ["WEATHER_API_KEY"])
@@ -147,7 +168,7 @@ class ServiceEditTests(unittest.TestCase):
             result = service.get_source(1, bot_id)
 
             self.assertTrue(result.ok, result.message)
-            self.assertEqual(result.code, "print('old')")
+            self.assertEqual(result.code, OLD_BOT_CODE)
 
     def test_ask_bot_uses_context_and_redacts_secrets(self):
         with tempfile.TemporaryDirectory() as tmp:

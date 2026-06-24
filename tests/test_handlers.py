@@ -6,6 +6,7 @@ from botmother.handlers import (
     format_ai_questions,
     format_bot_list,
     format_logs,
+    compact_bot_label,
     parse_ask_args,
     parse_bot_id,
     parse_tail_args,
@@ -70,6 +71,12 @@ class HandlerHelperTests(unittest.TestCase):
         text = format_bot_list([FakeRow(id=3, status="running", name="Echo")])
         self.assertIn("#3", text)
         self.assertIn("running", text)
+
+    def test_compact_bot_label_truncates_long_names(self):
+        text = compact_bot_label(FakeRow(id=3, status="running", name="Very long bot name that should shrink"))
+        self.assertIn("#3", text)
+        self.assertIn("🟢", text)
+        self.assertLessEqual(len(text), 32)
 
     def test_format_logs(self):
         text = format_logs([FakeRow(stream="stderr", line="boom")])

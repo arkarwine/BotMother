@@ -39,8 +39,17 @@ Runtime contract:
 - You may use Python standard library, sqlite3, and python-telegram-bot.
 - Use polling, not webhooks.
 - Prefer python-telegram-bot async ApplicationBuilder.
+- Prefer Telegram-native UX over command-heavy text flows.
+- Use ReplyKeyboardMarkup for persistent main menus and common user actions.
+- Use InlineKeyboardMarkup for choices, confirmations, item selection, pagination, admin actions, and next-step navigation.
+- Keep slash commands as fallback entry points, but make primary workflows tappable with buttons.
 - Create needed SQLite tables yourself inside BOT_DB_PATH.
 - Keep the bot simple, robust, and friendly.
+- Every child bot must register a global error handler with application.add_error_handler.
+- The global error handler must log exceptions and send a friendly fallback message when possible.
+- Telegram formatting must work reliably. Prefer ParseMode.HTML with html.escape for dynamic values.
+- If using MarkdownV2, escape every dynamic/user-provided value with telegram.helpers.escape_markdown(value, version=2).
+- Do not use legacy Markdown parse mode or unescaped user content in Markdown/HTML.
 
 Do not import subprocess, socket, ctypes, importlib, or multiprocessing.
 Do not call eval, exec, compile, __import__, os.system, os.remove, os.unlink, os.rmdir, os.rename, os.replace, shutil.move, or shutil.rmtree.
@@ -74,6 +83,7 @@ Rules:
 - Ask 1 to 3 questions at a time.
 - Ask only questions that materially change the implementation.
 - For type "questions", put the full natural-language follow-up message in "message" in the user's language/style.
+- Make user-facing messages fluid, concise, and helpful. Avoid robotic labels like "Suggestions:" unless the user explicitly wants that format.
 - BotMother will show only "message" to the user. It will not separately print question numbers, labels, suggestions, or follow-up counters.
 - Keep "questions" as internal structured state that mirrors the actual questions asked in "message".
 - Include practical suggestions naturally inside "message" when helpful. Do not use labels like "Suggestions:".
@@ -94,6 +104,7 @@ Answer in the same language/style as the user's question when possible.
 
 Rules:
 - Be concise and practical.
+- Be fluid and specific. Use short paragraphs and direct next steps.
 - Do not expose raw source code unless the user explicitly asks for a tiny snippet.
 - Do not reveal tokens, env var values, or secrets.
 - If the answer needs more evidence than the context contains, say what is unknown.
@@ -129,6 +140,7 @@ Rules:
 - Use type "questions" only when one or more essential values are missing.
 - Ask 1 to 3 questions at a time.
 - For type "questions", put the full natural-language follow-up message in "message" in the user's language/style.
+- Make the message feel like a helpful product assistant, not a form.
 - BotMother will show only "message" to the user. It will not separately print question numbers, labels, suggestions, or follow-up counters.
 - Keep "questions" as internal structured state that mirrors the actual questions asked in "message".
 """
@@ -653,6 +665,10 @@ class GeminiCodeGenerator:
             "Keep the same requested behavior. Do not add optional features or ask questions.\n"
             "Keep the BotMother runtime contract: read BOT_TOKEN and BOT_DB_PATH from os.environ.\n"
             "Do not hardcode tokens or secrets. Do not require env vars except the provided names and BotMother runtime vars.\n"
+            "Prefer Telegram-native buttons: ReplyKeyboardMarkup for main menus and InlineKeyboardMarkup for choices, confirmations, lists, pagination, and admin actions.\n"
+            "Keep slash commands as fallback, but make primary workflows tappable.\n"
+            "Ensure there is a global application.add_error_handler that logs exceptions and sends a friendly fallback message.\n"
+            "Ensure Telegram formatting works safely: prefer ParseMode.HTML with html.escape for dynamic values, or escape MarkdownV2 dynamic values with escape_markdown.\n"
             "Keep using only Python standard library, sqlite3, and python-telegram-bot.\n"
             "Do not import subprocess, socket, ctypes, importlib, or multiprocessing.\n"
             "Do not call eval, exec, compile, __import__, os.system, os.remove, os.unlink, os.rmdir, os.rename, os.replace, shutil.move, or shutil.rmtree.\n\n"

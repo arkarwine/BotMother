@@ -10,8 +10,46 @@ class CodeToolsTests(unittest.TestCase):
         self.assertEqual(extract_python_code(raw), "print('hello')")
 
     def test_validate_allows_simple_bot_code(self):
-        result = validate_generated_code("import os\nprint(os.environ['BOT_TOKEN'])")
+        result = validate_generated_code(
+            "import os\n"
+            "async def error_handler(update, context):\n"
+            "    pass\n"
+            "def main():\n"
+            "    application = object()\n"
+            "    application.add_error_handler(error_handler)\n"
+            "print(os.environ['BOT_TOKEN'])"
+        )
         self.assertTrue(result.ok, result.error)
+
+    def test_validate_requires_global_error_handler(self):
+        result = validate_generated_code("import os\nprint(os.environ['BOT_TOKEN'])")
+        self.assertFalse(result.ok)
+        self.assertIn("add_error_handler", result.error)
+
+    def test_validate_rejects_legacy_markdown_parse_mode(self):
+        result = validate_generated_code(
+            "from telegram.constants import ParseMode\n"
+            "async def error_handler(update, context):\n"
+            "    pass\n"
+            "def main():\n"
+            "    application = object()\n"
+            "    application.add_error_handler(error_handler)\n"
+            "mode = ParseMode.MARKDOWN\n"
+        )
+        self.assertFalse(result.ok)
+        self.assertIn("legacy", result.error)
+
+    def test_validate_rejects_legacy_markdown_string_parse_mode(self):
+        result = validate_generated_code(
+            "async def error_handler(update, context):\n"
+            "    pass\n"
+            "def main():\n"
+            "    application = object()\n"
+            "    application.add_error_handler(error_handler)\n"
+            "    application.bot.send_message(1, 'hi', parse_mode='Markdown')\n"
+        )
+        self.assertFalse(result.ok)
+        self.assertIn("legacy", result.error)
 
     def test_validate_rejects_syntax_error(self):
         result = validate_generated_code("def nope(:\n    pass")
@@ -46,4 +84,3 @@ class CodeToolsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
