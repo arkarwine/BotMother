@@ -22,6 +22,8 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(db.latest_revision(bot_id)["code"], "print('ok')")
             self.assertEqual(db.get_logs(bot_id)[0]["line"], "hello")
             self.assertEqual(db.get_bot_by_token("12345:abcdefghijklmnopqrstuvwxyzABCDE")["id"], bot_id)
+            db.set_bot_env_vars(bot_id, {"WEATHER_API_KEY": "secret"})
+            self.assertEqual(db.get_bot_env_vars(bot_id), {"WEATHER_API_KEY": "secret"})
 
     def test_soft_delete_hides_bot(self):
         with tempfile.TemporaryDirectory() as tmp:

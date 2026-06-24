@@ -10,7 +10,8 @@ The generated child bot is raw standalone Python. There is no user-facing schema
 - Users provide child bot tokens from `@BotFather`.
 - Gemini code generation with `gemini-3.1-flash-lite`.
 - SQLite state for users, bots, revisions, and recent logs.
-- Commands for create, revise, prompt edit, start, stop, restart, delete, status, and tail/logs.
+- Commands for create, AI-guided prompt edit, start, stop, restart, delete, status, and tail/logs.
+- AI can ask follow-up questions before creating or editing a bot.
 - Child bots are run as standalone Python subprocesses with only `BOT_TOKEN` and `BOT_DB_PATH` in their contract.
 
 ## Ubuntu Setup
@@ -56,12 +57,12 @@ PYTHON_BIN=/home/ubuntu/BotMother/.venv/bin/python
 ## Telegram Commands
 
 - `/start` - show basic help.
-- `/newbot` - create and launch a child bot.
+- `/newbot` - create and launch a child bot; AI may ask follow-up questions first.
 - `/bots` - list your bots. Owners see all bots.
 - `/status [id]` - show one child bot status, or list your bots when no id is given.
 - `/tail <id> [lines]` - show recent stdout/stderr lines, default 30 and max 100.
 - `/logs <id> [lines]` - alias for `/tail`.
-- `/edit <id>` - describe a change in natural language; BotMother updates the bot code internally.
+- `/edit <id>` - describe a change in natural language; AI may ask follow-up questions first.
 - `/stop <id>` - stop one child bot.
 - `/restart <id>` - restart one child bot.
 - `/delete <id>` - stop and soft-delete one child bot.
@@ -85,6 +86,8 @@ Allowed dependencies for generated child code:
 - Python standard library
 - `sqlite3`
 - `python-telegram-bot`
+
+If the AI asks for an external API key or config value, BotMother stores the supplied value as a per-bot environment variable and passes it to that child bot at runtime.
 
 ## Security Notes
 
@@ -122,4 +125,8 @@ Child bot stdout/stderr is still available through `/tail <id>`, `/logs <id>`, a
 
 ## Prompt Editing
 
-Use `/edit <id>`, then describe the change you want in normal language, for example `add a /help command` or `make the bot remember birthdays`. BotMother edits the existing generated Python internally, validates the new revision, saves it, and restarts the child bot when the edit is valid.
+Use `/edit <id>`, then describe the change you want in normal language, for example `add a /help command` or `make the bot remember birthdays`. BotMother lets the AI ask follow-up questions, edits the existing generated Python internally, validates the new revision, saves it, and restarts the child bot when the edit is valid.
+
+## AI Follow-Ups
+
+For `/newbot` and `/edit`, BotMother asks Gemini for a strict JSON decision. The decision type is either `questions` or `code`. When the AI returns questions, BotMother asks the user and sends the answers back into the next AI turn. To avoid endless loops, BotMother allows up to 5 follow-up rounds, then forces a final code decision or ends the flow if the AI still cannot proceed safely.

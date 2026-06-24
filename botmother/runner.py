@@ -119,14 +119,19 @@ class ProcessManager:
     def build_plain_command(self) -> list[str]:
         return [self.settings.python_bin, "bot.py"]
 
-    def _child_env(self, token: str, bot_db_path: str) -> dict[str, str]:
-        return {
+    def _child_env(self, token: str, bot_db_path: str, extra_env: dict[str, str] | None = None) -> dict[str, str]:
+        env = {
             "BOT_TOKEN": token,
             "BOT_DB_PATH": bot_db_path,
             "PATH": "/usr/local/bin:/usr/bin:/bin",
             "PYTHONUNBUFFERED": "1",
             "PYTHONIOENCODING": "utf-8",
         }
+        if extra_env:
+            for key, value in extra_env.items():
+                if key not in env:
+                    env[key] = value
+        return env
 
     async def start_bot(self, bot_id: int) -> None:
         if bot_id in self.active:
@@ -146,7 +151,8 @@ class ProcessManager:
         bot_dir.mkdir(parents=True, exist_ok=True)
         (bot_dir / "bot.py").write_text(revision["code"], encoding="utf-8")
         child_db = bot_dir / "bot.sqlite3"
-        env = self._child_env(bot["token"], "/app/bot.sqlite3" if self.settings.require_bwrap else str(child_db))
+        extra_env = self.db.get_bot_env_vars(bot_id)
+        env = self._child_env(bot["token"], "/app/bot.sqlite3" if self.settings.require_bwrap else str(child_db), extra_env)
 
         if self.settings.require_bwrap:
             if not self._host_python_exists(self._resolve_python_bin()):

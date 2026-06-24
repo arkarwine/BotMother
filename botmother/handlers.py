@@ -4,14 +4,15 @@ from html import escape
 import logging
 from typing import Any
 
+from .ai import AIDecision, MAX_FOLLOWUP_ROUNDS
 from .db import Database
-from .service import BotService
+from .service import BotService, OperationResult
 
 
 logger = logging.getLogger(__name__)
 
 
-NEW_PROMPT, NEW_TOKEN, REVISE_PROMPT, EDIT_PROMPT = range(4)
+NEW_PROMPT, NEW_FOLLOWUP, NEW_TOKEN, REVISE_PROMPT, EDIT_PROMPT, EDIT_FOLLOWUP = range(6)
 
 
 def parse_bot_id(args: list[str]) -> int | None:
@@ -81,6 +82,20 @@ def chunk_text(text: str, chunk_size: int = 3200) -> list[str]:
     return [text[index : index + chunk_size] for index in range(0, len(text), chunk_size)]
 
 
+def question_texts(decision: AIDecision) -> list[str]:
+    return [question.question for question in decision.questions]
+
+
+def format_ai_questions(decision: AIDecision, round_number: int) -> str:
+    lines = [decision.message or "I need a little more detail before building."]
+    for index, question in enumerate(decision.questions, start=1):
+        lines.append(f"{index}. {question.question}")
+        if question.suggestions:
+            lines.append("Suggestions: " + "; ".join(question.suggestions))
+    lines.append(f"Reply with your answers. Follow-up {round_number}/{MAX_FOLLOWUP_ROUNDS}.")
+    return "\n".join(lines)
+
+
 def _user_tuple(update: Any) -> tuple[int, str | None, str | None, str | None]:
     user = update.effective_user
     return (int(user.id), user.username, user.first_name, user.last_name)
@@ -119,7 +134,8 @@ def build_application(token: str, db: Database, service: BotService):
             "Use /newbot to build a child bot.\n"
             "Use /bots to list your bots.\n"
             "Use /tail <id> to see child bot logs.\n"
-            "Use /edit <id> to change a bot with a prompt."
+            "Use /edit <id> to change a bot with a prompt.\n"
+            "The AI may ask follow-up questions before building."
         )
 
     async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -144,22 +160,66 @@ def build_application(token: str, db: Database, service: BotService):
             return NEW_PROMPT
         logger.info("Received newbot prompt: user_id=%s chars=%s", user_id, len(prompt))
         context.user_data["newbot_prompt"] = prompt
+        context.user_data["newbot_answers"] = []
+        context.user_data.pop("newbot_decision", None)
+        return await continue_newbot_planning(update, context)
+
+    async def continue_newbot_planning(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        prompt = context.user_data.get("newbot_prompt", "")
+        answers = context.user_data.get("newbot_answers", [])
+        force_code = len(answers) >= MAX_FOLLOWUP_ROUNDS
+        await update.effective_message.reply_text("Thinking through the bot requirements...")
+        decision = service.plan_new_bot(prompt, answers, force_code=force_code)
+        if decision.needs_questions:
+            if force_code:
+                await update.effective_message.reply_text(
+                    "I hit the follow-up limit and the AI still was not ready to generate safely. "
+                    "Try /newbot again with the missing details included up front."
+                )
+                context.user_data.clear()
+                return ConversationHandler.END
+            context.user_data["newbot_pending_questions"] = question_texts(decision)
+            await update.effective_message.reply_text(format_ai_questions(decision, len(answers) + 1))
+            return NEW_FOLLOWUP
+
+        context.user_data["newbot_decision"] = decision
         await update.effective_message.reply_text(
-            "Now paste the child bot token from @BotFather. "
-            "Create a separate bot there with /newbot if you do not have one yet."
+            (decision.message + "\n\n" if decision.message else "")
+            + "Now paste the child bot token from @BotFather. Create a separate bot there with /newbot if needed."
         )
         return NEW_TOKEN
+
+    async def newbot_followup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        _remember_user(db, update)
+        answer = (update.effective_message.text or "").strip()
+        if not answer:
+            await update.effective_message.reply_text("Reply with your answers, or use /cancel.")
+            return NEW_FOLLOWUP
+        answers = context.user_data.setdefault("newbot_answers", [])
+        answers.append(
+            {
+                "questions": context.user_data.get("newbot_pending_questions", []),
+                "answer": answer,
+            }
+        )
+        context.user_data.pop("newbot_pending_questions", None)
+        return await continue_newbot_planning(update, context)
 
     async def newbot_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         user_id = _remember_user(db, update)
         prompt = context.user_data.get("newbot_prompt", "")
+        decision = context.user_data.get("newbot_decision")
         token_text = (update.effective_message.text or "").strip()
         logger.info("Received newbot token; creating bot: user_id=%s prompt_chars=%s", user_id, len(prompt))
-        await update.effective_message.reply_text("Generating raw Python and launching the child bot...")
-        result = await service.create_bot(user_id, _chat_id(update), prompt, token_text)
+        if not isinstance(decision, AIDecision):
+            await update.effective_message.reply_text("The AI plan expired. Use /newbot to start again.")
+            context.user_data.clear()
+            return ConversationHandler.END
+        await update.effective_message.reply_text("Validating generated code and launching the child bot...")
+        result = await service.create_bot_from_decision(user_id, _chat_id(update), prompt, token_text, decision)
         logger.info("Create bot result: user_id=%s ok=%s bot_id=%s", user_id, result.ok, result.bot_id)
         await update.effective_message.reply_text(result.message)
-        context.user_data.pop("newbot_prompt", None)
+        context.user_data.clear()
         return ConversationHandler.END
 
     async def bots(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -301,7 +361,8 @@ def build_application(token: str, db: Database, service: BotService):
         context.user_data["edit_bot_id"] = bot_id
         await update.effective_message.reply_text(
             "Describe what you want to change. "
-            "Example: add a /help command, or make the bot remember birthdays. Use /cancel to abort."
+            "Example: add a /help command, or make the bot remember birthdays. "
+            "The AI may ask follow-up questions. Use /cancel to abort."
         )
         return EDIT_PROMPT
 
@@ -312,12 +373,56 @@ def build_application(token: str, db: Database, service: BotService):
         if not prompt:
             await update.effective_message.reply_text("Describe the change you want.")
             return EDIT_PROMPT
-        await update.effective_message.reply_text("Editing with AI, validating, and restarting the child bot...")
-        result = await service.edit_bot_with_prompt(user_id, bot_id, prompt)
+        context.user_data["edit_prompt"] = prompt
+        context.user_data["edit_answers"] = []
+        return await continue_edit_planning(update, context)
+
+    async def continue_edit_planning(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        user_id = _remember_user(db, update)
+        bot_id = int(context.user_data["edit_bot_id"])
+        prompt = context.user_data.get("edit_prompt", "")
+        answers = context.user_data.get("edit_answers", [])
+        force_code = len(answers) >= MAX_FOLLOWUP_ROUNDS
+        await update.effective_message.reply_text("Thinking through the edit...")
+        decision = service.plan_edit_bot(user_id, bot_id, prompt, answers, force_code=force_code)
+        if isinstance(decision, OperationResult):
+            await update.effective_message.reply_text(decision.message)
+            context.user_data.clear()
+            return ConversationHandler.END
+        if decision.needs_questions:
+            if force_code:
+                await update.effective_message.reply_text(
+                    "I hit the follow-up limit and the AI still was not ready to edit safely. "
+                    "Try /edit again with the missing details included up front."
+                )
+                context.user_data.clear()
+                return ConversationHandler.END
+            context.user_data["edit_pending_questions"] = question_texts(decision)
+            await update.effective_message.reply_text(format_ai_questions(decision, len(answers) + 1))
+            return EDIT_FOLLOWUP
+
+        await update.effective_message.reply_text("Validating edited code and restarting the child bot...")
+        result = await service.edit_bot_from_decision(user_id, bot_id, prompt, decision)
         logger.info("Edit bot result: user_id=%s bot_id=%s ok=%s", user_id, bot_id, result.ok)
         await update.effective_message.reply_text(result.message)
-        context.user_data.pop("edit_bot_id", None)
+        context.user_data.clear()
         return ConversationHandler.END
+
+    async def edit_followup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        _remember_user(db, update)
+        answer = (update.effective_message.text or "").strip()
+        if not answer:
+            await update.effective_message.reply_text("Reply with your answers, or use /cancel.")
+            return EDIT_FOLLOWUP
+        answers = context.user_data.setdefault("edit_answers", [])
+        answers.append(
+            {
+                "questions": context.user_data.get("edit_pending_questions", []),
+                "answer": answer,
+            }
+        )
+        context.user_data.pop("edit_pending_questions", None)
+        return await continue_edit_planning(update, context)
 
     async def post_init(application) -> None:
         logger.info("Post-init: restoring child bots")
@@ -328,7 +433,7 @@ def build_application(token: str, db: Database, service: BotService):
                 BotCommand("bots", "List your child bots"),
                 BotCommand("status", "Show bot status, or list all bots"),
                 BotCommand("tail", "Show child bot logs"),
-                BotCommand("edit", "Change a child bot with a prompt"),
+                BotCommand("edit", "Change a child bot with prompts"),
                 BotCommand("delete", "Stop and delete a child bot"),
                 BotCommand("stop", "Stop a child bot"),
                 BotCommand("restart", "Restart a child bot"),
@@ -356,6 +461,7 @@ def build_application(token: str, db: Database, service: BotService):
         entry_points=[CommandHandler("newbot", newbot)],
         states={
             NEW_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, newbot_prompt)],
+            NEW_FOLLOWUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, newbot_followup)],
             NEW_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, newbot_token)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
@@ -373,6 +479,7 @@ def build_application(token: str, db: Database, service: BotService):
         entry_points=[CommandHandler("edit", edit)],
         states={
             EDIT_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_prompt)],
+            EDIT_FOLLOWUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_followup)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )

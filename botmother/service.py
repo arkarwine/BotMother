@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import logging
 from pathlib import Path
 
-from .ai import GeminiCodeGenerator
+from .ai import AIDecision, GeminiCodeGenerator
 from .code_tools import extract_python_code, validate_generated_code
 from .config import Settings
 from .db import Database
@@ -59,7 +59,50 @@ class BotService:
             return False
         return self.is_owner(user_id) or int(bot["owner_user_id"]) == user_id
 
+    def plan_new_bot(self, prompt: str, answer_history: list[dict], force_code: bool = False) -> AIDecision:
+        return self.generator.decide_new_bot(prompt, answer_history, force_code=force_code)
+
+    def plan_edit_bot(
+        self,
+        user_id: int,
+        bot_id: int,
+        edit_prompt: str,
+        answer_history: list[dict],
+        force_code: bool = False,
+    ) -> AIDecision | OperationResult:
+        if not self.can_manage(user_id, bot_id):
+            logger.info("Denied edit planning: user_id=%s bot_id=%s", user_id, bot_id)
+            return OperationResult(False, "Bot not found, or you do not have access.", bot_id)
+        existing_revision = self.db.latest_revision(bot_id)
+        if existing_revision is None or not existing_revision["code"]:
+            return OperationResult(False, f"Bot #{bot_id} has no saved source to edit.", bot_id)
+        return self.generator.decide_edit(existing_revision["code"], edit_prompt, answer_history, force_code=force_code)
+
     async def create_bot(self, user_id: int, chat_id: int, prompt: str, token: str) -> OperationResult:
+        raw = self.generator.generate_code(prompt)
+        return await self.create_bot_from_code(user_id, chat_id, prompt, token, raw)
+
+    async def create_bot_from_decision(
+        self,
+        user_id: int,
+        chat_id: int,
+        prompt: str,
+        token: str,
+        decision: AIDecision,
+    ) -> OperationResult:
+        if decision.type != "code" or not decision.code:
+            return OperationResult(False, "AI did not provide code yet.")
+        return await self.create_bot_from_code(user_id, chat_id, prompt, token, decision.code, self._env_dict(decision))
+
+    async def create_bot_from_code(
+        self,
+        user_id: int,
+        chat_id: int,
+        prompt: str,
+        token: str,
+        raw_code: str,
+        env_vars: dict[str, str] | None = None,
+    ) -> OperationResult:
         token = token.strip()
         if not is_valid_telegram_token(token):
             logger.info("Rejected invalid child token: user_id=%s chat_id=%s", user_id, chat_id)
@@ -79,6 +122,12 @@ class BotService:
                 return OperationResult(False, f"That token is already attached to bot #{existing['id']}.")
             return OperationResult(False, "That token is already attached to another active bot.")
 
+        code = extract_python_code(raw_code)
+        validation = validate_generated_code(code)
+        if not validation.ok:
+            logger.warning("Generated code failed validation before create: user_id=%s error=%s", user_id, validation.error)
+            return OperationResult(False, f"Generated code was rejected: {validation.error}")
+
         name = prompt_to_name(prompt)
         placeholder = self.settings.workdir / "pending"
         bot_id = self.db.create_bot(user_id, chat_id, name, prompt, token, placeholder)
@@ -86,10 +135,11 @@ class BotService:
         self._set_workdir(bot_id, bot_dir)
         logger.info("Created bot record: bot_id=%s user_id=%s chat_id=%s name=%r", bot_id, user_id, chat_id, name)
 
-        result = await self._generate_validate_and_save(bot_id, prompt)
-        if not result.ok:
-            logger.warning("Bot generation rejected: bot_id=%s message=%s", bot_id, result.message)
-            return result
+        if env_vars:
+            self.db.set_bot_env_vars(bot_id, env_vars)
+            logger.info("Stored child env vars: bot_id=%s count=%s", bot_id, len(env_vars))
+        self.db.add_revision(bot_id, prompt, code, "ok", None)
+        self.db.update_bot_status(bot_id, "ready")
 
         try:
             await self.runner.start_bot(bot_id)
@@ -131,17 +181,26 @@ class BotService:
         return OperationResult(True, f"Bot #{bot_id} revised and running.", bot_id)
 
     async def edit_bot_with_prompt(self, user_id: int, bot_id: int, edit_prompt: str) -> OperationResult:
+        plan = self.plan_edit_bot(user_id, bot_id, edit_prompt, [], force_code=True)
+        if isinstance(plan, OperationResult):
+            return plan
+        return await self.edit_bot_from_decision(user_id, bot_id, edit_prompt, plan)
+
+    async def edit_bot_from_decision(
+        self,
+        user_id: int,
+        bot_id: int,
+        edit_prompt: str,
+        decision: AIDecision,
+    ) -> OperationResult:
         if not self.can_manage(user_id, bot_id):
             logger.info("Denied edit: user_id=%s bot_id=%s", user_id, bot_id)
             return OperationResult(False, "Bot not found, or you do not have access.")
 
-        existing_revision = self.db.latest_revision(bot_id)
-        if existing_revision is None or not existing_revision["code"]:
-            return OperationResult(False, f"Bot #{bot_id} has no saved source to edit.", bot_id)
+        if decision.type != "code" or not decision.code:
+            return OperationResult(False, "AI did not provide edited code yet.", bot_id)
 
-        logger.info("Generating prompt edit: bot_id=%s user_id=%s prompt_chars=%s", bot_id, user_id, len(edit_prompt))
-        raw = self.generator.edit_code(existing_revision["code"], edit_prompt)
-        code = extract_python_code(raw)
+        code = extract_python_code(decision.code)
         validation = validate_generated_code(code)
         if not validation.ok:
             logger.warning("Prompt edit failed validation: bot_id=%s error=%s", bot_id, validation.error)
@@ -153,6 +212,10 @@ class BotService:
         if was_running:
             await self.runner.stop_bot(bot_id, mark_stopped=False)
 
+        env_vars = self._env_dict(decision)
+        if env_vars:
+            self.db.set_bot_env_vars(bot_id, env_vars)
+            logger.info("Stored child env vars after edit: bot_id=%s count=%s", bot_id, len(env_vars))
         self.db.add_revision(bot_id, f"Edit: {edit_prompt}", code, "ok", None)
         self.db.update_bot_status(bot_id, "ready")
         try:
@@ -224,6 +287,9 @@ class BotService:
 
     def _set_workdir(self, bot_id: int, bot_dir: Path) -> None:
         self.db.update_bot_workdir(bot_id, bot_dir)
+
+    def _env_dict(self, decision: AIDecision) -> dict[str, str]:
+        return {item.name: item.value for item in decision.env}
 
     async def _generate_validate_and_save(self, bot_id: int, prompt: str) -> OperationResult:
         logger.info("Generating revision: bot_id=%s prompt_chars=%s", bot_id, len(prompt))

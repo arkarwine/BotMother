@@ -57,6 +57,16 @@ CREATE TABLE IF NOT EXISTS logs (
     FOREIGN KEY(bot_id) REFERENCES bots(id)
 );
 
+CREATE TABLE IF NOT EXISTS bot_env_vars (
+    bot_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    value TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(bot_id, name),
+    FOREIGN KEY(bot_id) REFERENCES bots(id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_bots_owner ON bots(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_bots_status ON bots(status);
 CREATE INDEX IF NOT EXISTS idx_logs_bot_id ON logs(bot_id, id);
@@ -185,6 +195,29 @@ class Database:
                 "SELECT * FROM revisions WHERE bot_id = ? ORDER BY id DESC LIMIT 1",
                 (bot_id,),
             ).fetchone()
+
+    def set_bot_env_vars(self, bot_id: int, env_vars: dict[str, str]) -> None:
+        now = int(time.time())
+        with self.session() as conn:
+            for name, value in env_vars.items():
+                conn.execute(
+                    """
+                    INSERT INTO bot_env_vars (bot_id, name, value, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(bot_id, name) DO UPDATE SET
+                        value=excluded.value,
+                        updated_at=excluded.updated_at
+                    """,
+                    (bot_id, name, value, now, now),
+                )
+
+    def get_bot_env_vars(self, bot_id: int) -> dict[str, str]:
+        with self.session() as conn:
+            rows = conn.execute(
+                "SELECT name, value FROM bot_env_vars WHERE bot_id = ? ORDER BY name",
+                (bot_id,),
+            ).fetchall()
+            return {str(row["name"]): str(row["value"]) for row in rows}
 
     def running_bots(self) -> list[sqlite3.Row]:
         with self.session() as conn:

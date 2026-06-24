@@ -69,10 +69,15 @@ class RunnerTests(unittest.TestCase):
             settings = make_settings(tmp)
             db = Database(settings.db_path)
             manager = ProcessManager(settings, db)
-            env = manager._child_env("12345:abcdefghijklmnopqrstuvwxyzABCDE", "/app/bot.sqlite3")
+            env = manager._child_env(
+                "12345:abcdefghijklmnopqrstuvwxyzABCDE",
+                "/app/bot.sqlite3",
+                {"WEATHER_API_KEY": "secret", "BOT_TOKEN": "override"},
+            )
             self.assertEqual(env["BOT_TOKEN"], "12345:abcdefghijklmnopqrstuvwxyzABCDE")
             self.assertEqual(env["BOT_DB_PATH"], "/app/bot.sqlite3")
             self.assertEqual(env["PYTHONUNBUFFERED"], "1")
+            self.assertEqual(env["WEATHER_API_KEY"], "secret")
 
 
 if __name__ == "__main__":

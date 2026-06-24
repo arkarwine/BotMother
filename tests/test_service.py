@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from botmother.ai import AIDecision, AIEnvVar
 from botmother.config import Settings
 from botmother.db import Database
 from botmother.service import BotService
@@ -24,15 +25,20 @@ class FakeRunner:
 
 
 class FakeGenerator:
-    def __init__(self, edited_code: str):
+    def __init__(self, edited_code: str, env=None):
         self.edited_code = edited_code
+        self.env = tuple(env or ())
         self.current_code = None
         self.edit_prompt = None
+        self.answer_history = None
+        self.force_code = None
 
-    def edit_code(self, current_code: str, edit_prompt: str) -> str:
+    def decide_edit(self, current_code: str, edit_prompt: str, answer_history, force_code: bool = False):
         self.current_code = current_code
         self.edit_prompt = edit_prompt
-        return self.edited_code
+        self.answer_history = answer_history
+        self.force_code = force_code
+        return AIDecision("code", "Ready.", (), self.edited_code, self.env)
 
 
 def make_settings(tmp: str) -> Settings:
@@ -49,7 +55,7 @@ def make_settings(tmp: str) -> Settings:
     )
 
 
-def make_service(tmp: str, edited_code: str = "print('new')"):
+def make_service(tmp: str, edited_code: str = "print('new')", env=None):
     settings = make_settings(tmp)
     db = Database(settings.db_path)
     db.initialize()
@@ -64,7 +70,7 @@ def make_service(tmp: str, edited_code: str = "print('new')"):
     )
     db.add_revision(bot_id, "make echo", "print('old')", "ok", None)
     runner = FakeRunner()
-    generator = FakeGenerator(edited_code)
+    generator = FakeGenerator(edited_code, env=env)
     return BotService(settings, db, generator, runner), db, runner, generator, bot_id
 
 
@@ -83,7 +89,8 @@ class ServiceEditTests(unittest.TestCase):
 
     def test_valid_prompt_edit_restarts_running_bot(self):
         with tempfile.TemporaryDirectory() as tmp:
-            service, db, runner, generator, bot_id = make_service(tmp, edited_code="print('new')")
+            env = [AIEnvVar("WEATHER_API_KEY", "secret")]
+            service, db, runner, generator, bot_id = make_service(tmp, edited_code="print('new')", env=env)
             runner.active[bot_id] = object()
 
             result = asyncio.run(service.edit_bot_with_prompt(1, bot_id, "make it friendlier"))
@@ -93,6 +100,7 @@ class ServiceEditTests(unittest.TestCase):
             self.assertEqual(runner.start_count, 1)
             self.assertIn(bot_id, runner.active)
             self.assertEqual(db.latest_revision(bot_id)["code"], "print('new')")
+            self.assertEqual(db.get_bot_env_vars(bot_id), {"WEATHER_API_KEY": "secret"})
             self.assertEqual(generator.current_code, "print('old')")
             self.assertEqual(generator.edit_prompt, "make it friendlier")
 
