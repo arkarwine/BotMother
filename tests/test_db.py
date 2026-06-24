@@ -33,7 +33,27 @@ class DatabaseTests(unittest.TestCase):
             db.soft_delete_bot(bot_id)
             self.assertIsNone(db.get_bot(bot_id))
             self.assertEqual(db.get_bot(bot_id, include_deleted=True)["status"], "deleted")
-            self.assertEqual(db.get_bot_by_token(token)["id"], bot_id)
+            self.assertIsNone(db.get_bot_by_token(token))
+            new_bot_id = db.create_bot(1, 100, "Echo again", "make echo again", token, Path(tmp) / "2")
+            self.assertEqual(db.get_bot_by_token(token)["id"], new_bot_id)
+
+    def test_release_deleted_token_repairs_legacy_deleted_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "botmother.sqlite3")
+            db.initialize()
+            db.upsert_user(1, None, None, None)
+            token = "12345:abcdefghijklmnopqrstuvwxyzABCDE"
+            bot_id = db.create_bot(1, 100, "Echo", "make echo", token, Path(tmp) / "1")
+            with db.session() as conn:
+                conn.execute(
+                    "UPDATE bots SET status = 'deleted', deleted_at = 123 WHERE id = ?",
+                    (bot_id,),
+                )
+
+            self.assertIsNone(db.get_bot_by_token(token))
+            self.assertEqual(db.release_deleted_token(token), 1)
+            new_bot_id = db.create_bot(1, 100, "Echo again", "make echo again", token, Path(tmp) / "2")
+            self.assertEqual(db.get_bot_by_token(token)["id"], new_bot_id)
 
 
 if __name__ == "__main__":

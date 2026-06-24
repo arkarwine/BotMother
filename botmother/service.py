@@ -59,10 +59,17 @@ class BotService:
         if token == self.settings.mother_bot_token:
             logger.warning("Rejected mother token as child token: user_id=%s chat_id=%s", user_id, chat_id)
             return OperationResult(False, "That token belongs to the mother bot. Create a separate child bot in BotFather.")
+
+        released = self.db.release_deleted_token(token)
+        if released:
+            logger.info("Released token from deleted bot record: user_id=%s count=%s", user_id, released)
+
         existing = self.db.get_bot_by_token(token)
         if existing is not None:
             logger.info("Rejected duplicate child token: user_id=%s existing_bot_id=%s", user_id, existing["id"])
-            return OperationResult(False, f"That token is already attached to bot #{existing['id']}.")
+            if self.is_owner(user_id) or int(existing["owner_user_id"]) == user_id:
+                return OperationResult(False, f"That token is already attached to bot #{existing['id']}.")
+            return OperationResult(False, "That token is already attached to another active bot.")
 
         name = prompt_to_name(prompt)
         placeholder = self.settings.workdir / "pending"

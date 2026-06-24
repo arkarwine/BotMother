@@ -142,7 +142,25 @@ class Database:
 
     def get_bot_by_token(self, token: str) -> sqlite3.Row | None:
         with self.session() as conn:
-            return conn.execute("SELECT * FROM bots WHERE token = ? ORDER BY id DESC LIMIT 1", (token,)).fetchone()
+            return conn.execute(
+                "SELECT * FROM bots WHERE token = ? AND deleted_at IS NULL ORDER BY id DESC LIMIT 1",
+                (token,),
+            ).fetchone()
+
+    def release_deleted_token(self, token: str) -> int:
+        now = int(time.time())
+        with self.session() as conn:
+            cur = conn.execute(
+                """
+                UPDATE bots
+                SET token = '__deleted__:' || id || ':' || token,
+                    updated_at = ?
+                WHERE token = ?
+                  AND deleted_at IS NOT NULL
+                """,
+                (now, token),
+            )
+            return int(cur.rowcount)
 
     def list_bots(self, owner_user_id: int | None = None, include_deleted: bool = False) -> list[sqlite3.Row]:
         clauses = []
@@ -230,7 +248,14 @@ class Database:
             conn.execute(
                 """
                 UPDATE bots
-                SET status = 'deleted', pid = NULL, deleted_at = ?, updated_at = ?
+                SET status = 'deleted',
+                    pid = NULL,
+                    deleted_at = ?,
+                    updated_at = ?,
+                    token = CASE
+                        WHEN token LIKE '__deleted__:%' THEN token
+                        ELSE '__deleted__:' || id || ':' || token
+                    END
                 WHERE id = ?
                 """,
                 (now, now, bot_id),
