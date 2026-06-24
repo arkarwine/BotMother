@@ -1,6 +1,6 @@
 import unittest
 
-from botmother.handlers import format_bot_list, format_logs, parse_bot_id
+from botmother.handlers import format_bot_list, format_logs, parse_bot_id, parse_tail_args
 
 
 class FakeRow(dict):
@@ -14,6 +14,27 @@ class HandlerHelperTests(unittest.TestCase):
         self.assertIsNone(parse_bot_id([]))
         self.assertIsNone(parse_bot_id(["abc"]))
         self.assertIsNone(parse_bot_id(["0"]))
+
+    def test_parse_tail_args_defaults_limit(self):
+        self.assertEqual(parse_tail_args(["12"]), (12, 30, None))
+
+    def test_parse_tail_args_accepts_limit(self):
+        self.assertEqual(parse_tail_args(["12", "50"]), (12, 50, None))
+
+    def test_parse_tail_args_clamps_limit(self):
+        self.assertEqual(parse_tail_args(["12", "500"]), (12, 100, None))
+
+    def test_parse_tail_args_requires_bot_id(self):
+        bot_id, limit, error = parse_tail_args([])
+        self.assertIsNone(bot_id)
+        self.assertEqual(limit, 30)
+        self.assertIn("/tail", error)
+
+    def test_parse_tail_args_rejects_bad_limit(self):
+        bot_id, limit, error = parse_tail_args(["12", "nope"])
+        self.assertEqual(bot_id, 12)
+        self.assertEqual(limit, 30)
+        self.assertIn("number", error)
 
     def test_format_empty_bot_list(self):
         self.assertIn("/newbot", format_bot_list([]))
@@ -30,4 +51,3 @@ class HandlerHelperTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

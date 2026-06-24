@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from html import escape
+import logging
 from typing import Any
 
 from .db import Database
 from .service import BotService
+
+
+logger = logging.getLogger(__name__)
 
 
 NEW_PROMPT, NEW_TOKEN, REVISE_PROMPT = range(3)
@@ -18,6 +22,24 @@ def parse_bot_id(args: list[str]) -> int | None:
     except ValueError:
         return None
     return value if value > 0 else None
+
+
+def parse_tail_args(args: list[str], default_limit: int = 30, max_limit: int = 100) -> tuple[int | None, int, str | None]:
+    bot_id = parse_bot_id(args)
+    if bot_id is None:
+        return None, default_limit, "Usage: /tail <id> [lines]"
+
+    if len(args) < 2:
+        return bot_id, default_limit, None
+
+    try:
+        limit = int(args[1])
+    except ValueError:
+        return bot_id, default_limit, "Lines must be a number."
+
+    if limit < 1:
+        return bot_id, default_limit, "Lines must be at least 1."
+    return bot_id, min(limit, max_limit), None
 
 
 def format_bot_list(rows: list[Any]) -> str:
@@ -70,7 +92,7 @@ def _remember_user(db: Database, update: Any) -> int:
 
 def build_application(token: str, db: Database, service: BotService):
     try:
-        from telegram import Update
+        from telegram import BotCommand, Update
         from telegram.constants import ParseMode
         from telegram.ext import (
             ApplicationBuilder,
@@ -84,30 +106,36 @@ def build_application(token: str, db: Database, service: BotService):
         raise RuntimeError("python-telegram-bot is not installed. Run: pip install -r requirements.txt") from exc
 
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        _remember_user(db, update)
+        user_id = _remember_user(db, update)
+        logger.info("Command /start: user_id=%s chat_id=%s", user_id, _chat_id(update))
         await update.effective_message.reply_text(
             "BotMother is ready.\n"
             "Use /newbot to build a child bot.\n"
-            "Use /bots to list your bots."
+            "Use /bots to list your bots.\n"
+            "Use /tail <id> to see child bot logs."
         )
 
     async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        user_id = _remember_user(db, update)
+        logger.info("Command /cancel: user_id=%s chat_id=%s", user_id, _chat_id(update))
         context.user_data.clear()
         await update.effective_message.reply_text("Cancelled.")
         return ConversationHandler.END
 
     async def newbot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        _remember_user(db, update)
+        user_id = _remember_user(db, update)
+        logger.info("Command /newbot: user_id=%s chat_id=%s", user_id, _chat_id(update))
         context.user_data.pop("newbot_prompt", None)
         await update.effective_message.reply_text("Describe the Telegram bot you want to build.")
         return NEW_PROMPT
 
     async def newbot_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        _remember_user(db, update)
+        user_id = _remember_user(db, update)
         prompt = (update.effective_message.text or "").strip()
         if not prompt:
             await update.effective_message.reply_text("Send a text prompt describing the child bot.")
             return NEW_PROMPT
+        logger.info("Received newbot prompt: user_id=%s chars=%s", user_id, len(prompt))
         context.user_data["newbot_prompt"] = prompt
         await update.effective_message.reply_text(
             "Now paste the child bot token from @BotFather. "
@@ -119,21 +147,27 @@ def build_application(token: str, db: Database, service: BotService):
         user_id = _remember_user(db, update)
         prompt = context.user_data.get("newbot_prompt", "")
         token_text = (update.effective_message.text or "").strip()
+        logger.info("Received newbot token; creating bot: user_id=%s prompt_chars=%s", user_id, len(prompt))
         await update.effective_message.reply_text("Generating raw Python and launching the child bot...")
         result = await service.create_bot(user_id, _chat_id(update), prompt, token_text)
+        logger.info("Create bot result: user_id=%s ok=%s bot_id=%s", user_id, result.ok, result.bot_id)
         await update.effective_message.reply_text(result.message)
         context.user_data.pop("newbot_prompt", None)
         return ConversationHandler.END
 
     async def bots(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
-        await update.effective_message.reply_text(format_bot_list(service.list_bots_for(user_id)))
+        rows = service.list_bots_for(user_id)
+        logger.info("Command /bots: user_id=%s count=%s", user_id, len(rows))
+        await update.effective_message.reply_text(format_bot_list(rows))
 
     async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
         bot_id = parse_bot_id(context.args)
+        logger.info("Command /status: user_id=%s bot_id=%s", user_id, bot_id)
         if bot_id is None:
-            await update.effective_message.reply_text("Usage: /status <id>")
+            rows = service.list_bots_for(user_id)
+            await update.effective_message.reply_text(format_bot_list(rows))
             return
         row = service.get_accessible_bot(user_id, bot_id)
         if row is None:
@@ -141,24 +175,27 @@ def build_application(token: str, db: Database, service: BotService):
             return
         await update.effective_message.reply_text(format_bot_status(row))
 
-    async def logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def tail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
-        bot_id = parse_bot_id(context.args)
-        if bot_id is None:
-            await update.effective_message.reply_text("Usage: /logs <id>")
+        command = update.effective_message.text.split(maxsplit=1)[0] if update.effective_message.text else "/tail"
+        bot_id, limit, error = parse_tail_args(context.args)
+        logger.info("Command %s: user_id=%s bot_id=%s limit=%s", command, user_id, bot_id, limit)
+        if error is not None:
+            await update.effective_message.reply_text(error)
             return
         row = service.get_accessible_bot(user_id, bot_id)
         if row is None:
             await update.effective_message.reply_text("Bot not found, or you do not have access.")
             return
         await update.effective_message.reply_text(
-            f"<pre>{escape(format_logs(db.get_logs(bot_id, 30)))}</pre>",
+            f"<pre>{escape(format_logs(db.get_logs(bot_id, limit)))}</pre>",
             parse_mode=ParseMode.HTML,
         )
 
     async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
         bot_id = parse_bot_id(context.args)
+        logger.info("Command /stop: user_id=%s bot_id=%s", user_id, bot_id)
         if bot_id is None:
             await update.effective_message.reply_text("Usage: /stop <id>")
             return
@@ -168,6 +205,7 @@ def build_application(token: str, db: Database, service: BotService):
     async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
         bot_id = parse_bot_id(context.args)
+        logger.info("Command /restart: user_id=%s bot_id=%s", user_id, bot_id)
         if bot_id is None:
             await update.effective_message.reply_text("Usage: /restart <id>")
             return
@@ -177,6 +215,7 @@ def build_application(token: str, db: Database, service: BotService):
     async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
         bot_id = parse_bot_id(context.args)
+        logger.info("Command /delete: user_id=%s bot_id=%s", user_id, bot_id)
         if bot_id is None:
             await update.effective_message.reply_text("Usage: /delete <id>")
             return
@@ -185,12 +224,14 @@ def build_application(token: str, db: Database, service: BotService):
 
     async def killall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
+        logger.warning("Command /killall: user_id=%s", user_id)
         result = await service.kill_all(user_id)
         await update.effective_message.reply_text(result.message)
 
     async def revise(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         user_id = _remember_user(db, update)
         bot_id = parse_bot_id(context.args)
+        logger.info("Command /revise: user_id=%s bot_id=%s", user_id, bot_id)
         if bot_id is None:
             await update.effective_message.reply_text("Usage: /revise <id>")
             return ConversationHandler.END
@@ -208,17 +249,45 @@ def build_application(token: str, db: Database, service: BotService):
         if not prompt:
             await update.effective_message.reply_text("Send a text prompt for the revision.")
             return REVISE_PROMPT
+        logger.info("Received revise prompt: user_id=%s bot_id=%s chars=%s", user_id, bot_id, len(prompt))
         await update.effective_message.reply_text("Regenerating raw Python and restarting the child bot...")
         result = await service.revise_bot(user_id, bot_id, prompt)
+        logger.info("Revise bot result: user_id=%s bot_id=%s ok=%s", user_id, bot_id, result.ok)
         await update.effective_message.reply_text(result.message)
         context.user_data.pop("revise_bot_id", None)
         return ConversationHandler.END
 
     async def post_init(application) -> None:
+        logger.info("Post-init: restoring child bots")
+        await application.bot.set_my_commands(
+            [
+                BotCommand("start", "Show help"),
+                BotCommand("newbot", "Create and launch a child bot"),
+                BotCommand("bots", "List your child bots"),
+                BotCommand("status", "Show bot status, or list all bots"),
+                BotCommand("tail", "Show child bot logs"),
+                BotCommand("delete", "Stop and delete a child bot"),
+                BotCommand("stop", "Stop a child bot"),
+                BotCommand("restart", "Restart a child bot"),
+                BotCommand("revise", "Regenerate a child bot"),
+                BotCommand("cancel", "Cancel the active flow"),
+            ]
+        )
         await service.runner.restore_running_bots()
 
     async def post_shutdown(application) -> None:
+        logger.info("Post-shutdown: stopping active child bots")
         await service.runner.stop_all(mark_stopped=False)
+
+    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        exc = context.error
+        exc_info = (type(exc), exc, exc.__traceback__) if exc is not None else None
+        logger.error("Unhandled Telegram handler error: update=%r", update, exc_info=exc_info)
+        if isinstance(update, Update) and update.effective_message is not None:
+            try:
+                await update.effective_message.reply_text("Something went wrong. Check BotMother logs.")
+            except Exception:
+                logger.exception("Failed to send handler error message")
 
     newbot_conv = ConversationHandler(
         entry_points=[CommandHandler("newbot", newbot)],
@@ -249,10 +318,12 @@ def build_application(token: str, db: Database, service: BotService):
     application.add_handler(revise_conv)
     application.add_handler(CommandHandler("bots", bots))
     application.add_handler(CommandHandler("status", status))
-    application.add_handler(CommandHandler("logs", logs))
+    application.add_handler(CommandHandler("tail", tail))
+    application.add_handler(CommandHandler("logs", tail))
     application.add_handler(CommandHandler("stop", stop))
     application.add_handler(CommandHandler("restart", restart))
     application.add_handler(CommandHandler("delete", delete))
     application.add_handler(CommandHandler("killall", killall))
     application.add_handler(CommandHandler("cancel", cancel))
+    application.add_error_handler(error_handler)
     return application

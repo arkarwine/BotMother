@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 
 SYSTEM_PROMPT = """You generate Telegram bot source code.
@@ -37,6 +41,7 @@ class GeminiCodeGenerator:
         self._client = genai.Client(api_key=self.api_key)
 
     def generate_code(self, user_prompt: str) -> str:
+        logger.info("Generating child bot code: model=%s prompt_chars=%s", self.model, len(user_prompt))
         prompt = (
             "Build this Telegram bot from the user's request. "
             "Return only the complete Python source file.\n\n"
@@ -49,6 +54,7 @@ class GeminiCodeGenerator:
         )
         text = getattr(response, "text", None)
         if text:
+            logger.info("Gemini returned generated code: chars=%s", len(text))
             return text
+        logger.error("Gemini returned an empty response")
         raise RuntimeError("Gemini returned an empty response.")
-

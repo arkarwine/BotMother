@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 import shutil
-import sys
 from typing import Any
 
 from .config import Settings
 from .db import Database
+
+
+logger = logging.getLogger(__name__)
 
 
 class RunnerError(RuntimeError):
@@ -38,21 +41,40 @@ class ProcessManager:
             return configured
         return shutil.which(configured) or configured
 
+    def _host_python_exists(self, python_bin: str) -> bool:
+        path = Path(python_bin)
+        if path.is_absolute():
+            return path.exists()
+        return shutil.which(python_bin) is not None
+
+    def _find_venv_root(self, path: Path) -> Path | None:
+        current = path if path.is_dir() else path.parent
+        while current != current.parent:
+            if (current / "pyvenv.cfg").exists():
+                return current
+            current = current.parent
+        return None
+
     def _python_bind_roots(self, python_bin: str) -> list[Path]:
         path = Path(python_bin)
         if not path.is_absolute():
             return []
-        resolved = path.resolve()
+
         roots: list[Path] = []
-        if str(resolved).startswith("/usr/"):
+        configured_venv = self._find_venv_root(path)
+        if configured_venv is not None:
+            roots.append(configured_venv)
+
+        resolved = path.resolve()
+        resolved_venv = self._find_venv_root(resolved)
+        if resolved_venv is not None and resolved_venv not in roots:
+            roots.append(resolved_venv)
+
+        if roots:
             return roots
 
-        current = resolved.parent
-        while current != current.parent:
-            if (current / "pyvenv.cfg").exists():
-                roots.append(current)
-                return roots
-            current = current.parent
+        if str(resolved).startswith("/usr/"):
+            return roots
         roots.append(resolved.parent)
         return roots
 
@@ -108,13 +130,16 @@ class ProcessManager:
 
     async def start_bot(self, bot_id: int) -> None:
         if bot_id in self.active:
+            logger.info("Start skipped; bot already active: bot_id=%s", bot_id)
             return
 
         bot = self.db.get_bot(bot_id)
         if bot is None:
+            logger.error("Start failed; bot does not exist: bot_id=%s", bot_id)
             raise RunnerError(f"Bot {bot_id} does not exist.")
         revision = self.db.latest_revision(bot_id)
         if revision is None or revision["validation_status"] != "ok":
+            logger.error("Start failed; no valid revision: bot_id=%s", bot_id)
             raise RunnerError(f"Bot {bot_id} has no valid revision.")
 
         bot_dir = Path(bot["workdir"])
@@ -124,7 +149,14 @@ class ProcessManager:
         env = self._child_env(bot["token"], "/app/bot.sqlite3" if self.settings.require_bwrap else str(child_db))
 
         if self.settings.require_bwrap:
+            if not self._host_python_exists(self._resolve_python_bin()):
+                self.db.update_bot_status(bot_id, "python_missing")
+                raise RunnerError(
+                    f"Python executable '{self.settings.python_bin}' was not found. "
+                    "Set PYTHON_BIN to an existing interpreter, for example .venv/bin/python."
+                )
             if shutil.which(self.settings.bwrap_bin) is None:
+                logger.error("Bubblewrap missing: executable=%s bot_id=%s", self.settings.bwrap_bin, bot_id)
                 self.db.update_bot_status(bot_id, "sandbox_missing")
                 raise RunnerError(
                     f"Bubblewrap executable '{self.settings.bwrap_bin}' was not found. "
@@ -137,6 +169,13 @@ class ProcessManager:
             cwd = str(bot_dir)
 
         self.db.update_bot_status(bot_id, "starting")
+        logger.info(
+            "Starting child bot: bot_id=%s sandbox=%s cwd=%s command=%s",
+            bot_id,
+            self.settings.require_bwrap,
+            cwd or "-",
+            command,
+        )
         process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
@@ -148,6 +187,7 @@ class ProcessManager:
         self.active[bot_id] = record
         self.db.mark_started(bot_id, process.pid or 0)
         self.db.add_log(bot_id, "system", f"Started process pid={process.pid}", self.settings.log_tail_rows)
+        logger.info("Child process started: bot_id=%s pid=%s", bot_id, process.pid)
 
         if process.stdout is not None:
             record.tasks.append(asyncio.create_task(self._pump_stream(bot_id, "stdout", process.stdout, bot_dir)))
@@ -178,25 +218,30 @@ class ProcessManager:
         if current is record:
             self.active.pop(bot_id, None)
         if record.desired_stop:
+            logger.info("Child process stopped: bot_id=%s rc=%s", bot_id, return_code)
             self.db.add_log(bot_id, "system", f"Stopped process rc={return_code}", self.settings.log_tail_rows)
             return
         self.db.mark_stopped(bot_id, "crashed")
         self.db.add_log(bot_id, "system", f"Process exited unexpectedly rc={return_code}", self.settings.log_tail_rows)
+        logger.warning("Child process crashed/exited: bot_id=%s rc=%s", bot_id, return_code)
 
     async def stop_bot(self, bot_id: int, mark_stopped: bool = True) -> None:
         record = self.active.get(bot_id)
         if record is None:
+            logger.info("Stop requested for inactive bot: bot_id=%s", bot_id)
             if mark_stopped:
                 self.db.mark_stopped(bot_id)
             return
 
         record.desired_stop = True
         process = record.process
+        logger.info("Stopping child process: bot_id=%s pid=%s", bot_id, process.pid)
         if process.returncode is None:
             process.terminate()
             try:
                 await asyncio.wait_for(process.wait(), timeout=10)
             except asyncio.TimeoutError:
+                logger.warning("Child process did not terminate; killing: bot_id=%s pid=%s", bot_id, process.pid)
                 process.kill()
                 await process.wait()
 
@@ -209,21 +254,25 @@ class ProcessManager:
             self.db.add_log(bot_id, "system", "Stopped by request", self.settings.log_tail_rows)
 
     async def restart_bot(self, bot_id: int) -> None:
+        logger.info("Restarting child bot: bot_id=%s", bot_id)
         await self.stop_bot(bot_id, mark_stopped=False)
         await self.start_bot(bot_id)
 
     async def restore_running_bots(self) -> None:
-        for bot in self.db.running_bots():
+        bots = self.db.running_bots()
+        logger.info("Restoring running child bots: count=%s", len(bots))
+        for bot in bots:
             try:
                 await self.start_bot(int(bot["id"]))
             except Exception as exc:
+                logger.exception("Restore failed: bot_id=%s", bot["id"])
                 self.db.mark_stopped(int(bot["id"]), "restore_failed")
                 self.db.add_log(int(bot["id"]), "system", f"Restore failed: {exc}", self.settings.log_tail_rows)
 
     async def stop_all(self, mark_stopped: bool = True) -> None:
         bot_ids = list(self.active)
+        logger.info("Stopping all active child bots: count=%s mark_stopped=%s", len(bot_ids), mark_stopped)
         for bot_id in bot_ids:
             await self.stop_bot(bot_id, mark_stopped=mark_stopped)
         if mark_stopped:
             self.db.set_many_stopped(bot_ids)
-

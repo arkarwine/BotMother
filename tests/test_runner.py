@@ -38,6 +38,32 @@ class RunnerTests(unittest.TestCase):
             self.assertNotIn("BOT_TOKEN", joined)
             self.assertNotIn("mother_token", joined)
 
+    def test_sandbox_binds_configured_venv_root_before_resolving_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            venv = Path(tmp) / ".venv"
+            python_bin = venv / "bin" / "python3"
+            python_bin.parent.mkdir(parents=True)
+            python_bin.write_text("", encoding="utf-8")
+            (venv / "pyvenv.cfg").write_text("", encoding="utf-8")
+            settings = make_settings(tmp)
+            settings = Settings(
+                mother_bot_token=settings.mother_bot_token,
+                gemini_api_key=settings.gemini_api_key,
+                gemini_model=settings.gemini_model,
+                db_path=settings.db_path,
+                workdir=settings.workdir,
+                owner_ids=settings.owner_ids,
+                python_bin=str(python_bin),
+                bwrap_bin=settings.bwrap_bin,
+                require_bwrap=settings.require_bwrap,
+            )
+            db = Database(settings.db_path)
+            manager = ProcessManager(settings, db)
+            cmd = manager.build_sandbox_command(Path(tmp) / "bots" / "1")
+
+            self.assertIn("--ro-bind", cmd)
+            self.assertIn(str(venv), cmd)
+
     def test_child_env_contains_runtime_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
             settings = make_settings(tmp)
@@ -51,4 +77,3 @@ class RunnerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

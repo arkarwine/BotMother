@@ -64,6 +64,8 @@ class Settings:
     bwrap_bin: str
     require_bwrap: bool
     log_tail_rows: int = 2000
+    log_level: str = "INFO"
+    log_file: Path | None = None
 
     @classmethod
     def from_env(cls, env_file: str | Path = ".env") -> "Settings":
@@ -80,6 +82,8 @@ class Settings:
             bwrap_bin=os.getenv("BWRAP_BIN", "bwrap").strip() or "bwrap",
             require_bwrap=_bool_from_env(os.getenv("BOTMOTHER_REQUIRE_BWRAP"), True),
             log_tail_rows=int(os.getenv("BOTMOTHER_LOG_TAIL_ROWS", "2000")),
+            log_level=os.getenv("BOTMOTHER_LOG_LEVEL", "INFO").strip() or "INFO",
+            log_file=_path_from_env(os.getenv("BOTMOTHER_LOG_FILE", "./data/botmother.log"), base_dir),
         )
 
     def validate_for_runtime(self) -> None:
@@ -91,4 +95,3 @@ class Settings:
         if missing:
             joined = ", ".join(missing)
             raise RuntimeError(f"Missing required environment variables: {joined}")
-
