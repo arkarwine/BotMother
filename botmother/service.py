@@ -22,6 +22,14 @@ class OperationResult:
     bot_id: int | None = None
 
 
+@dataclass(frozen=True)
+class SourceResult:
+    ok: bool
+    message: str
+    code: str | None = None
+    bot_id: int | None = None
+
+
 def prompt_to_name(prompt: str) -> str:
     name = " ".join(prompt.strip().split())
     if not name:
@@ -122,6 +130,35 @@ class BotService:
         logger.info("Bot revised and running: bot_id=%s user_id=%s", bot_id, user_id)
         return OperationResult(True, f"Bot #{bot_id} revised and running.", bot_id)
 
+    async def edit_bot_code(self, user_id: int, bot_id: int, raw_code: str) -> OperationResult:
+        if not self.can_manage(user_id, bot_id):
+            logger.info("Denied edit: user_id=%s bot_id=%s", user_id, bot_id)
+            return OperationResult(False, "Bot not found, or you do not have access.")
+
+        code = extract_python_code(raw_code)
+        validation = validate_generated_code(code)
+        if not validation.ok:
+            logger.warning("Manual edit failed validation: bot_id=%s error=%s", bot_id, validation.error)
+            self.db.add_revision(bot_id, "Manual edit", code, "failed", validation.error)
+            return OperationResult(False, f"Edited code for bot #{bot_id} was rejected: {validation.error}", bot_id)
+
+        was_running = bot_id in self.runner.active
+        logger.info("Applying manual edit: bot_id=%s user_id=%s was_running=%s code_chars=%s", bot_id, user_id, was_running, len(code))
+        if was_running:
+            await self.runner.stop_bot(bot_id, mark_stopped=False)
+
+        self.db.add_revision(bot_id, "Manual edit", code, "ok", None)
+        self.db.update_bot_status(bot_id, "ready")
+        try:
+            await self.runner.start_bot(bot_id)
+        except Exception as exc:
+            logger.exception("Launch failed after manual edit: bot_id=%s", bot_id)
+            self.db.update_bot_status(bot_id, "launch_failed")
+            self.db.add_log(bot_id, "system", f"Launch failed after manual edit: {exc}", self.settings.log_tail_rows)
+            return OperationResult(False, f"Manual edit saved for bot #{bot_id}, but launch failed: {exc}", bot_id)
+
+        return OperationResult(True, f"Bot #{bot_id} edited and running.", bot_id)
+
     async def stop_bot(self, user_id: int, bot_id: int) -> OperationResult:
         if not self.can_manage(user_id, bot_id):
             logger.info("Denied stop: user_id=%s bot_id=%s", user_id, bot_id)
@@ -169,6 +206,15 @@ class BotService:
         if not self.can_manage(user_id, bot_id):
             return None
         return self.db.get_bot(bot_id)
+
+    def get_source(self, user_id: int, bot_id: int) -> SourceResult:
+        if not self.can_manage(user_id, bot_id):
+            logger.info("Denied source: user_id=%s bot_id=%s", user_id, bot_id)
+            return SourceResult(False, "Bot not found, or you do not have access.", bot_id=bot_id)
+        revision = self.db.latest_revision(bot_id)
+        if revision is None or not revision["code"]:
+            return SourceResult(False, f"Bot #{bot_id} has no saved source yet.", bot_id=bot_id)
+        return SourceResult(True, f"Source for bot #{bot_id}.", revision["code"], bot_id)
 
     def _set_workdir(self, bot_id: int, bot_dir: Path) -> None:
         self.db.update_bot_workdir(bot_id, bot_dir)

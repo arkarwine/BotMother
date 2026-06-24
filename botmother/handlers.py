@@ -11,7 +11,7 @@ from .service import BotService
 logger = logging.getLogger(__name__)
 
 
-NEW_PROMPT, NEW_TOKEN, REVISE_PROMPT = range(3)
+NEW_PROMPT, NEW_TOKEN, REVISE_PROMPT, EDIT_CODE = range(4)
 
 
 def parse_bot_id(args: list[str]) -> int | None:
@@ -75,6 +75,12 @@ def format_logs(rows: list[Any]) -> str:
     return text
 
 
+def chunk_text(text: str, chunk_size: int = 3200) -> list[str]:
+    if not text:
+        return [""]
+    return [text[index : index + chunk_size] for index in range(0, len(text), chunk_size)]
+
+
 def _user_tuple(update: Any) -> tuple[int, str | None, str | None, str | None]:
     user = update.effective_user
     return (int(user.id), user.username, user.first_name, user.last_name)
@@ -112,7 +118,8 @@ def build_application(token: str, db: Database, service: BotService):
             "BotMother is ready.\n"
             "Use /newbot to build a child bot.\n"
             "Use /bots to list your bots.\n"
-            "Use /tail <id> to see child bot logs."
+            "Use /tail <id> to see child bot logs.\n"
+            "Use /source <id> and /edit <id> to edit raw code."
         )
 
     async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -192,6 +199,27 @@ def build_application(token: str, db: Database, service: BotService):
             parse_mode=ParseMode.HTML,
         )
 
+    async def source(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = _remember_user(db, update)
+        bot_id = parse_bot_id(context.args)
+        logger.info("Command /source: user_id=%s bot_id=%s", user_id, bot_id)
+        if bot_id is None:
+            await update.effective_message.reply_text("Usage: /source <id>")
+            return
+        result = service.get_source(user_id, bot_id)
+        if not result.ok or result.code is None:
+            await update.effective_message.reply_text(result.message)
+            return
+
+        chunks = chunk_text(result.code)
+        if len(chunks) > 1:
+            await update.effective_message.reply_text(f"Source for bot #{bot_id} ({len(chunks)} parts):")
+        for chunk in chunks:
+            await update.effective_message.reply_text(
+                f"<pre>{escape(chunk)}</pre>",
+                parse_mode=ParseMode.HTML,
+            )
+
     async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
         bot_id = parse_bot_id(context.args)
@@ -257,6 +285,37 @@ def build_application(token: str, db: Database, service: BotService):
         context.user_data.pop("revise_bot_id", None)
         return ConversationHandler.END
 
+    async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        user_id = _remember_user(db, update)
+        bot_id = parse_bot_id(context.args)
+        logger.info("Command /edit: user_id=%s bot_id=%s", user_id, bot_id)
+        if bot_id is None:
+            await update.effective_message.reply_text("Usage: /edit <id>")
+            return ConversationHandler.END
+        if not service.can_manage(user_id, bot_id):
+            await update.effective_message.reply_text("Bot not found, or you do not have access.")
+            return ConversationHandler.END
+        context.user_data["edit_bot_id"] = bot_id
+        await update.effective_message.reply_text(
+            "Paste the complete replacement bot.py source code. "
+            "Markdown code fences are okay. Use /cancel to abort."
+        )
+        return EDIT_CODE
+
+    async def edit_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        user_id = _remember_user(db, update)
+        bot_id = int(context.user_data["edit_bot_id"])
+        code = (update.effective_message.text or "").strip()
+        if not code:
+            await update.effective_message.reply_text("Paste the complete replacement Python code.")
+            return EDIT_CODE
+        await update.effective_message.reply_text("Validating edited code and restarting the child bot...")
+        result = await service.edit_bot_code(user_id, bot_id, code)
+        logger.info("Edit bot result: user_id=%s bot_id=%s ok=%s", user_id, bot_id, result.ok)
+        await update.effective_message.reply_text(result.message)
+        context.user_data.pop("edit_bot_id", None)
+        return ConversationHandler.END
+
     async def post_init(application) -> None:
         logger.info("Post-init: restoring child bots")
         await application.bot.set_my_commands(
@@ -266,6 +325,8 @@ def build_application(token: str, db: Database, service: BotService):
                 BotCommand("bots", "List your child bots"),
                 BotCommand("status", "Show bot status, or list all bots"),
                 BotCommand("tail", "Show child bot logs"),
+                BotCommand("source", "Show raw child bot code"),
+                BotCommand("edit", "Replace raw child bot code"),
                 BotCommand("delete", "Stop and delete a child bot"),
                 BotCommand("stop", "Stop a child bot"),
                 BotCommand("restart", "Restart a child bot"),
@@ -306,6 +367,14 @@ def build_application(token: str, db: Database, service: BotService):
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
+    edit_conv = ConversationHandler(
+        entry_points=[CommandHandler("edit", edit)],
+        states={
+            EDIT_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_code)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
     application = (
         ApplicationBuilder()
         .token(token)
@@ -316,10 +385,12 @@ def build_application(token: str, db: Database, service: BotService):
     application.add_handler(CommandHandler("start", start))
     application.add_handler(newbot_conv)
     application.add_handler(revise_conv)
+    application.add_handler(edit_conv)
     application.add_handler(CommandHandler("bots", bots))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("tail", tail))
     application.add_handler(CommandHandler("logs", tail))
+    application.add_handler(CommandHandler("source", source))
     application.add_handler(CommandHandler("stop", stop))
     application.add_handler(CommandHandler("restart", restart))
     application.add_handler(CommandHandler("delete", delete))

@@ -1,6 +1,6 @@
 import unittest
 
-from botmother.handlers import format_bot_list, format_logs, parse_bot_id, parse_tail_args
+from botmother.handlers import chunk_text, format_bot_list, format_logs, parse_bot_id, parse_tail_args
 
 
 class FakeRow(dict):
@@ -47,6 +47,10 @@ class HandlerHelperTests(unittest.TestCase):
     def test_format_logs(self):
         text = format_logs([FakeRow(stream="stderr", line="boom")])
         self.assertEqual(text, "[stderr] boom")
+
+    def test_chunk_text(self):
+        self.assertEqual(chunk_text("abcdef", 2), ["ab", "cd", "ef"])
+        self.assertEqual(chunk_text("", 2), [""])
 
 
 if __name__ == "__main__":

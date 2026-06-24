@@ -10,7 +10,7 @@ The generated child bot is raw standalone Python. There is no user-facing schema
 - Users provide child bot tokens from `@BotFather`.
 - Gemini code generation with `gemini-3.1-flash-lite`.
 - SQLite state for users, bots, revisions, and recent logs.
-- Commands for create, revise, start, stop, restart, delete, status, and tail/logs.
+- Commands for create, revise, manual edit, source view, start, stop, restart, delete, status, and tail/logs.
 - Child bots are run as standalone Python subprocesses with only `BOT_TOKEN` and `BOT_DB_PATH` in their contract.
 
 ## Ubuntu Setup
@@ -61,6 +61,8 @@ PYTHON_BIN=/home/ubuntu/BotMother/.venv/bin/python
 - `/status [id]` - show one child bot status, or list your bots when no id is given.
 - `/tail <id> [lines]` - show recent stdout/stderr lines, default 30 and max 100.
 - `/logs <id> [lines]` - alias for `/tail`.
+- `/source <id>` - show the current raw Python source for a child bot.
+- `/edit <id>` - paste a full replacement `bot.py`; BotMother validates it and restarts the bot.
 - `/stop <id>` - stop one child bot.
 - `/restart <id>` - restart one child bot.
 - `/delete <id>` - stop and soft-delete one child bot.
@@ -118,3 +120,7 @@ tail -f ./data/botmother.log
 ```
 
 Child bot stdout/stderr is still available through `/tail <id>`, `/logs <id>`, and per-bot files under `data/bots/<id>/`.
+
+## Manual Editing
+
+Use `/source <id>` to copy the current generated Python, edit it locally, then use `/edit <id>` and paste the full replacement `bot.py`. BotMother accepts plain Python or a Markdown fenced Python block, runs the same syntax and denylist validation, saves a new revision, and restarts the child bot when the edit is valid.
