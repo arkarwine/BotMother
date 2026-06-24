@@ -8,9 +8,11 @@ from botmother.config import Settings
 from botmother.db import Database
 from botmother.service import BotService
 
-
 OLD_BOT_CODE = """async def error_handler(update, context):
     pass
+
+async def setup(application):
+    await application.bot.set_my_commands([])
 
 def main():
     application = object()
@@ -21,6 +23,9 @@ VALUE = 'old'
 
 NEW_BOT_CODE = """async def error_handler(update, context):
     pass
+
+async def setup(application):
+    await application.bot.set_my_commands([])
 
 def main():
     application = object()
@@ -58,8 +63,23 @@ class FakeGenerator:
         self.bot_context = None
         self.bot_question = None
         self.refinement_calls = []
+        self.new_bot_calls = 0
+        self.new_bot_prompt = None
 
-    def decide_edit(self, current_code: str, edit_prompt: str, answer_history, force_code: bool = False):
+    def decide_new_bot(self, prompt: str, answer_history, force_code: bool = False):
+        self.new_bot_calls += 1
+        self.new_bot_prompt = prompt
+        self.answer_history = answer_history
+        self.force_code = force_code
+        return AIDecision("code", "Ready.", (), self.edited_code, self.env)
+
+    def decide_edit(
+        self,
+        current_code: str,
+        edit_prompt: str,
+        answer_history,
+        force_code: bool = False,
+    ):
         self.current_code = current_code
         self.edit_prompt = edit_prompt
         self.answer_history = answer_history
@@ -130,12 +150,39 @@ def make_service(tmp: str, edited_code: str = NEW_BOT_CODE, env=None):
 
 
 class ServiceEditTests(unittest.TestCase):
+    def test_plan_new_bot_asks_for_localization_when_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _, _, generator, _ = make_service(tmp)
+
+            decision = service.plan_new_bot("simple todo bot", [], force_code=False)
+
+            self.assertTrue(decision.needs_questions)
+            self.assertEqual(decision.questions[0].id, "localization_languages")
+            self.assertEqual(generator.new_bot_calls, 0)
+
+    def test_plan_new_bot_skips_localization_question_when_languages_are_given(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _, _, generator, _ = make_service(tmp)
+
+            decision = service.plan_new_bot(
+                "simple todo bot in English and Burmese",
+                [],
+                force_code=False,
+            )
+
+            self.assertEqual(decision.type, "code")
+            self.assertEqual(generator.new_bot_calls, 1)
+
     def test_invalid_prompt_edit_does_not_stop_running_bot(self):
         with tempfile.TemporaryDirectory() as tmp:
-            service, db, runner, _, bot_id = make_service(tmp, edited_code="import subprocess\n")
+            service, db, runner, _, bot_id = make_service(
+                tmp, edited_code="import subprocess\n"
+            )
             runner.active[bot_id] = object()
 
-            result = asyncio.run(service.edit_bot_with_prompt(1, bot_id, "add shell command support"))
+            result = asyncio.run(
+                service.edit_bot_with_prompt(1, bot_id, "add shell command support")
+            )
 
             self.assertFalse(result.ok)
             self.assertEqual(runner.stop_count, 0)
@@ -145,10 +192,14 @@ class ServiceEditTests(unittest.TestCase):
     def test_valid_prompt_edit_restarts_running_bot(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = [AIEnvVar("WEATHER_API_KEY", "secret")]
-            service, db, runner, generator, bot_id = make_service(tmp, edited_code=NEW_BOT_CODE, env=env)
+            service, db, runner, generator, bot_id = make_service(
+                tmp, edited_code=NEW_BOT_CODE, env=env
+            )
             runner.active[bot_id] = object()
 
-            result = asyncio.run(service.edit_bot_with_prompt(1, bot_id, "make it friendlier"))
+            result = asyncio.run(
+                service.edit_bot_with_prompt(1, bot_id, "make it friendlier")
+            )
 
             self.assertTrue(result.ok, result.message)
             self.assertEqual(runner.stop_count, 1)
@@ -159,7 +210,9 @@ class ServiceEditTests(unittest.TestCase):
             self.assertEqual(generator.current_code, OLD_BOT_CODE)
             self.assertEqual(generator.edit_prompt, "make it friendlier")
             self.assertEqual(len(generator.refinement_calls), 3)
-            self.assertEqual(generator.refinement_calls[0]["env_names"], ["WEATHER_API_KEY"])
+            self.assertEqual(
+                generator.refinement_calls[0]["env_names"], ["WEATHER_API_KEY"]
+            )
 
     def test_get_source_returns_latest_revision(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -175,7 +228,9 @@ class ServiceEditTests(unittest.TestCase):
             service, db, _, generator, bot_id = make_service(tmp)
             secret_token = "12345:abcdefghijklmnopqrstuvwxyzABCDE"
             db.set_bot_env_vars(bot_id, {"WEATHER_API_KEY": "secret-value"})
-            db.add_log(bot_id, "stderr", f"failed with {secret_token} and secret-value", 50)
+            db.add_log(
+                bot_id, "stderr", f"failed with {secret_token} and secret-value", 50
+            )
 
             result = service.ask_bot(1, bot_id, "what does it do?")
 

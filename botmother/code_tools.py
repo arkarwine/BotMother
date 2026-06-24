@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import ast
 import re
-
+from dataclasses import dataclass
 
 FENCE_RE = re.compile(r"```(?:python|py)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 
@@ -42,6 +41,7 @@ class DenylistVisitor(ast.NodeVisitor):
         self.module_aliases: dict[str, str] = {}
         self.denied_call_names: set[str] = set(DENIED_NAME_CALLS)
         self.has_global_error_handler = False
+        self.has_command_menu_registration = False
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
@@ -68,8 +68,12 @@ class DenylistVisitor(ast.NodeVisitor):
         if isinstance(node.func, ast.Name) and node.func.id in self.denied_call_names:
             self.errors.append(f"Denied call: {node.func.id}()")
 
-        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
-            module_root = self.module_aliases.get(node.func.value.id, node.func.value.id)
+        if isinstance(node.func, ast.Attribute) and isinstance(
+            node.func.value, ast.Name
+        ):
+            module_root = self.module_aliases.get(
+                node.func.value.id, node.func.value.id
+            )
             call = (module_root, node.func.attr)
             if call in DENIED_MODULE_CALLS:
                 self.errors.append(f"Denied call: {module_root}.{node.func.attr}()")
@@ -77,19 +81,32 @@ class DenylistVisitor(ast.NodeVisitor):
         if isinstance(node.func, ast.Name) and node.func.id == "getattr":
             self.errors.append("Denied call: getattr()")
 
-        if isinstance(node.func, ast.Attribute) and node.func.attr == "add_error_handler":
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_error_handler"
+        ):
             self.has_global_error_handler = True
+
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "set_my_commands":
+            self.has_command_menu_registration = True
 
         for keyword in node.keywords:
             if keyword.arg == "parse_mode" and isinstance(keyword.value, ast.Constant):
-                if str(keyword.value.value).lower() in {"markdown", "parsemode.markdown"}:
-                    self.errors.append("Use HTML or MarkdownV2 with escaping, not legacy Markdown parse mode.")
+                if str(keyword.value.value).lower() in {
+                    "markdown",
+                    "parsemode.markdown",
+                }:
+                    self.errors.append(
+                        "Use HTML or MarkdownV2 with escaping, not legacy Markdown parse mode."
+                    )
 
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if node.attr == "MARKDOWN":
-            self.errors.append("Use ParseMode.HTML or ParseMode.MARKDOWN_V2, not legacy ParseMode.MARKDOWN.")
+            self.errors.append(
+                "Use ParseMode.HTML or ParseMode.MARKDOWN_V2, not legacy ParseMode.MARKDOWN."
+            )
         self.generic_visit(node)
 
 
@@ -121,5 +138,13 @@ def validate_generated_code(code: str) -> ValidationResult:
     if visitor.errors:
         return ValidationResult(False, "; ".join(visitor.errors))
     if not visitor.has_global_error_handler:
-        return ValidationResult(False, "Missing global error handler: call application.add_error_handler(...).")
+        return ValidationResult(
+            False,
+            "Missing global error handler: call application.add_error_handler(...).",
+        )
+    if not visitor.has_command_menu_registration:
+        return ValidationResult(
+            False,
+            "Missing bot command menu registration: call application.bot.set_my_commands(...).",
+        )
     return ValidationResult(True)

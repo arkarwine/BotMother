@@ -14,6 +14,8 @@ class CodeToolsTests(unittest.TestCase):
             "import os\n"
             "async def error_handler(update, context):\n"
             "    pass\n"
+            "async def setup(application):\n"
+            "    await application.bot.set_my_commands([])\n"
             "def main():\n"
             "    application = object()\n"
             "    application.add_error_handler(error_handler)\n"
@@ -31,6 +33,8 @@ class CodeToolsTests(unittest.TestCase):
             "from telegram.constants import ParseMode\n"
             "async def error_handler(update, context):\n"
             "    pass\n"
+            "async def setup(application):\n"
+            "    await application.bot.set_my_commands([])\n"
             "def main():\n"
             "    application = object()\n"
             "    application.add_error_handler(error_handler)\n"
@@ -43,6 +47,8 @@ class CodeToolsTests(unittest.TestCase):
         result = validate_generated_code(
             "async def error_handler(update, context):\n"
             "    pass\n"
+            "async def setup(application):\n"
+            "    await application.bot.set_my_commands([])\n"
             "def main():\n"
             "    application = object()\n"
             "    application.add_error_handler(error_handler)\n"
@@ -50,6 +56,17 @@ class CodeToolsTests(unittest.TestCase):
         )
         self.assertFalse(result.ok)
         self.assertIn("legacy", result.error)
+
+    def test_validate_requires_command_menu_registration(self):
+        result = validate_generated_code(
+            "async def error_handler(update, context):\n"
+            "    pass\n"
+            "def main():\n"
+            "    application = object()\n"
+            "    application.add_error_handler(error_handler)\n"
+        )
+        self.assertFalse(result.ok)
+        self.assertIn("set_my_commands", result.error)
 
     def test_validate_rejects_syntax_error(self):
         result = validate_generated_code("def nope(:\n    pass")
@@ -62,7 +79,9 @@ class CodeToolsTests(unittest.TestCase):
         self.assertIn("Denied import", result.error)
 
     def test_validate_rejects_aliased_os_system(self):
-        result = validate_generated_code("import os as operating\noperating.system('whoami')")
+        result = validate_generated_code(
+            "import os as operating\noperating.system('whoami')"
+        )
         self.assertFalse(result.ok)
         self.assertIn("os.system", result.error)
 
