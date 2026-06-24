@@ -1,0 +1,18 @@
+[Unit]
+Description=BotMother Telegram bot builder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/botmother
+EnvironmentFile=/opt/botmother/.env
+ExecStart=/opt/botmother/.venv/bin/python -m botmother
+Restart=on-failure
+RestartSec=5
+User=botmother
+Group=botmother
+
+[Install]
+WantedBy=multi-user.target
+
