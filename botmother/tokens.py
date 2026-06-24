@@ -4,6 +4,7 @@ import re
 
 
 TOKEN_RE = re.compile(r"^\d{5,20}:[A-Za-z0-9_-]{30,}$")
+TOKEN_IN_TEXT_RE = re.compile(r"\b\d{5,20}:[A-Za-z0-9_-]{30,}\b")
 
 
 def is_valid_telegram_token(token: str) -> bool:
@@ -19,3 +20,6 @@ def mask_token(token: str) -> str:
         return f"{bot_id}:***"
     return f"{bot_id}:{secret[:4]}...{secret[-4:]}"
 
+
+def redact_telegram_tokens(text: str) -> str:
+    return TOKEN_IN_TEXT_RE.sub("[telegram token redacted]", text)

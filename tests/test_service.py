@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from botmother.ai import AIDecision, AIEnvVar
+from botmother.ai import AIDecision, AIEnvVar, AIReadinessDecision
 from botmother.config import Settings
 from botmother.db import Database
 from botmother.service import BotService
@@ -25,13 +25,18 @@ class FakeRunner:
 
 
 class FakeGenerator:
-    def __init__(self, edited_code: str, env=None):
+    def __init__(self, edited_code: str, env=None, answer: str = "It echoes messages."):
         self.edited_code = edited_code
         self.env = tuple(env or ())
+        self.answer = answer
+        self.readiness = AIReadinessDecision("ready", "Ready.", ())
         self.current_code = None
         self.edit_prompt = None
         self.answer_history = None
         self.force_code = None
+        self.bot_context = None
+        self.bot_question = None
+        self.refinement_calls = []
 
     def decide_edit(self, current_code: str, edit_prompt: str, answer_history, force_code: bool = False):
         self.current_code = current_code
@@ -39,6 +44,35 @@ class FakeGenerator:
         self.answer_history = answer_history
         self.force_code = force_code
         return AIDecision("code", "Ready.", (), self.edited_code, self.env)
+
+    def answer_bot_question(self, bot_context: str, question: str) -> str:
+        self.bot_context = bot_context
+        self.bot_question = question
+        return self.answer
+
+    def check_new_bot_readiness(self, prompt: str, answer_history, decision):
+        return self.readiness
+
+    def refine_code_for_deploy(
+        self,
+        user_prompt: str,
+        current_code: str,
+        env_names,
+        layer: int,
+        total_layers: int,
+        validation_error=None,
+    ) -> str:
+        self.refinement_calls.append(
+            {
+                "prompt": user_prompt,
+                "code": current_code,
+                "env_names": list(env_names),
+                "layer": layer,
+                "total_layers": total_layers,
+                "validation_error": validation_error,
+            }
+        )
+        return current_code
 
 
 def make_settings(tmp: str) -> Settings:
@@ -103,6 +137,8 @@ class ServiceEditTests(unittest.TestCase):
             self.assertEqual(db.get_bot_env_vars(bot_id), {"WEATHER_API_KEY": "secret"})
             self.assertEqual(generator.current_code, "print('old')")
             self.assertEqual(generator.edit_prompt, "make it friendlier")
+            self.assertEqual(len(generator.refinement_calls), 3)
+            self.assertEqual(generator.refinement_calls[0]["env_names"], ["WEATHER_API_KEY"])
 
     def test_get_source_returns_latest_revision(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -112,6 +148,34 @@ class ServiceEditTests(unittest.TestCase):
 
             self.assertTrue(result.ok, result.message)
             self.assertEqual(result.code, "print('old')")
+
+    def test_ask_bot_uses_context_and_redacts_secrets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, db, _, generator, bot_id = make_service(tmp)
+            secret_token = "12345:abcdefghijklmnopqrstuvwxyzABCDE"
+            db.set_bot_env_vars(bot_id, {"WEATHER_API_KEY": "secret-value"})
+            db.add_log(bot_id, "stderr", f"failed with {secret_token} and secret-value", 50)
+
+            result = service.ask_bot(1, bot_id, "what does it do?")
+
+            self.assertTrue(result.ok, result.message)
+            self.assertEqual(result.message, "It echoes messages.")
+            self.assertEqual(generator.bot_question, "what does it do?")
+            self.assertIn("Original prompt", generator.bot_context)
+            self.assertIn("Latest source", generator.bot_context)
+            self.assertIn("WEATHER_API_KEY", generator.bot_context)
+            self.assertNotIn(secret_token, generator.bot_context)
+            self.assertNotIn("secret-value", generator.bot_context)
+
+    def test_ask_bot_denies_inaccessible_bot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _, _, generator, bot_id = make_service(tmp)
+
+            result = service.ask_bot(2, bot_id, "what does it do?")
+
+            self.assertFalse(result.ok)
+            self.assertIn("access", result.message)
+            self.assertIsNone(generator.bot_question)
 
 
 if __name__ == "__main__":

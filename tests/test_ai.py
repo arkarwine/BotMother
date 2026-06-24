@@ -1,6 +1,6 @@
 import unittest
 
-from botmother.ai import AIResponseError, GeminiCodeGenerator, parse_ai_decision
+from botmother.ai import AIDecision, AIResponseError, GeminiCodeGenerator, parse_ai_decision, parse_readiness_decision
 
 
 class FakeResponse:
@@ -166,6 +166,74 @@ class AIDecisionTests(unittest.TestCase):
         self.assertTrue(decision.needs_questions)
         self.assertEqual(decision.questions[0].id, "clarify_request")
         self.assertEqual(len(generator._client.models.calls), 3)
+
+    def test_parse_readiness_ready(self):
+        decision = parse_readiness_decision(
+            """
+            {
+              "type": "ready",
+              "message": "Ready.",
+              "questions": []
+            }
+            """
+        )
+
+        self.assertFalse(decision.needs_questions)
+        self.assertEqual(decision.message, "Ready.")
+
+    def test_parse_readiness_questions(self):
+        decision = parse_readiness_decision(
+            """
+            {
+              "type": "questions",
+              "message": "Admin ID လိုပါတယ်။",
+              "questions": [{"id": "admin_id", "question": "Admin user ID?", "suggestions": []}]
+            }
+            """
+        )
+
+        self.assertTrue(decision.needs_questions)
+        self.assertEqual(decision.questions[0].id, "admin_id")
+
+    def test_check_new_bot_readiness_uses_strict_json(self):
+        generator = make_generator(
+            [
+                """
+                {
+                  "type": "ready",
+                  "message": "Ready.",
+                  "questions": []
+                }
+                """
+            ]
+        )
+        code_decision = AIDecision("code", "Ready.", (), "print('ok')", ())
+
+        decision = generator.check_new_bot_readiness("make an echo bot", [], code_decision)
+
+        self.assertEqual(decision.type, "ready")
+        call = generator._client.models.calls[0]
+        self.assertEqual(call["config"]["response_mime_type"], "application/json")
+        self.assertIn("Final readiness check", call["contents"])
+        self.assertIn("Do not ask for the Telegram token", call["contents"])
+
+    def test_refine_code_for_deploy_returns_raw_python(self):
+        generator = make_generator(["print('refined')"])
+
+        code = generator.refine_code_for_deploy(
+            "make an echo bot",
+            "print('original')",
+            ["WEATHER_API_KEY"],
+            2,
+            3,
+            "old error",
+        )
+
+        self.assertEqual(code, "print('refined')")
+        call = generator._client.models.calls[0]
+        self.assertIn("Layer 2/3", call["contents"])
+        self.assertIn("WEATHER_API_KEY", call["contents"])
+        self.assertIn("old error", call["contents"])
 
 
 if __name__ == "__main__":

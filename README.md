@@ -10,8 +10,10 @@ The generated child bot is raw standalone Python. There is no user-facing schema
 - Users provide child bot tokens from `@BotFather`.
 - Gemini code generation with `gemini-3.1-flash-lite`.
 - SQLite state for users, bots, revisions, and recent logs.
-- Commands for create, AI-guided prompt edit, start, stop, restart, delete, status, and tail/logs.
+- Commands for create, AI-guided prompt edit, ask, start, stop, restart, delete, status, and tail/logs.
 - AI can ask follow-up questions before creating or editing a bot.
+- AI runs a final essential-data readiness check before asking for the child bot token.
+- AI runs several raw-Python refinement passes before deployment.
 - Child bots are run as standalone Python subprocesses with only `BOT_TOKEN` and `BOT_DB_PATH` in their contract.
 
 ## Ubuntu Setup
@@ -62,6 +64,7 @@ PYTHON_BIN=/home/ubuntu/BotMother/.venv/bin/python
 - `/status [id]` - show one child bot status, or list your bots when no id is given.
 - `/tail <id> [lines]` - show recent stdout/stderr lines, default 30 and max 100.
 - `/logs <id> [lines]` - alias for `/tail`.
+- `/ask <id> [question]` - ask the AI about a child bot using its saved prompt, status, source, env names, and recent logs.
 - `/edit <id>` - describe a change in natural language; AI may ask follow-up questions first.
 - `/stop <id>` - stop one child bot.
 - `/restart <id>` - restart one child bot.
@@ -134,5 +137,9 @@ Use `/edit <id>`, then describe the change you want in normal language, for exam
 ## AI Follow-Ups
 
 For `/newbot` and `/edit`, BotMother asks Gemini for a strict JSON decision. The decision type is either `questions` or `code`. When the AI returns questions, BotMother sends Gemini's user-facing message directly, then sends the user's answer back into the next AI turn. The structured question fields are internal only, so BotMother does not add visible question numbers, suggestion labels, or follow-up counters. To avoid endless loops, BotMother allows up to 5 internal follow-up rounds, then forces a final code decision or ends the flow if the AI still cannot proceed safely.
+
+After the normal `/newbot` questions, BotMother runs a separate readiness check before asking for the BotFather token. This check asks only for missing essential data needed to run the bot, such as required admin IDs, API keys, payment/contact details, or external service settings. It does not ask optional preference questions and it never asks for the Telegram token.
+
+Before saving and launching generated code, BotMother runs 3 AI refinement layers. Each layer must return raw standalone Python. BotMother validates each candidate and keeps the last valid version, so a bad refinement pass cannot overwrite a deployable previous pass.
 
 Planner JSON repair is also bounded. If Gemini returns invalid JSON or tries to set reserved runtime env vars such as `BOT_TOKEN`, BotMother sends the validation error back to Gemini for up to 2 repair attempts, then falls back to asking the user to restate the request.

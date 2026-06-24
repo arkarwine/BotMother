@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 MAX_FOLLOWUP_ROUNDS = 5
 MAX_JSON_REPAIR_ATTEMPTS = 2
+AI_REFINEMENT_LAYERS = 3
 RUNTIME_PROVIDED_ENV = {
     "BOT_TOKEN": "the child Telegram bot token from BotFather; BotMother injects this at launch",
     "BOT_DB_PATH": "the child bot's SQLite database path; BotMother injects this at launch",
@@ -86,10 +87,58 @@ Rules:
 """
 
 
+ASK_SYSTEM_PROMPT = """You answer questions from a Telegram bot owner about one generated child bot.
+
+Use the provided bot context: saved prompt, status, latest source, configured env var names, and recent logs.
+Answer in the same language/style as the user's question when possible.
+
+Rules:
+- Be concise and practical.
+- Do not expose raw source code unless the user explicitly asks for a tiny snippet.
+- Do not reveal tokens, env var values, or secrets.
+- If the answer needs more evidence than the context contains, say what is unknown.
+- If the user wants to change behavior, suggest using /edit <id> with the requested change.
+- Do not claim the bot can do something unless the context supports it.
+"""
+
+
+READINESS_SYSTEM_PROMPT = f"""You are BotMother's final requirements checker before a generated child Telegram bot asks for its BotFather token.
+
+Return exactly one JSON object matching this schema:
+{{
+  "type": "ready" | "questions",
+  "message": "complete user-facing message BotMother can send verbatim",
+  "questions": [
+    {{
+      "id": "lower_snake_case_id",
+      "question": "one clear question",
+      "suggestions": ["optional short suggested answer", "optional short suggested answer"]
+    }}
+  ]
+}}
+
+Rules:
+- Return JSON only. No Markdown. No prose outside JSON.
+- Check only whether essential data is missing for the generated bot to run usefully as requested.
+- Essential means the bot would be unusable, unable to authenticate to a required external service, unable to identify required admins/operators, unable to display required payment/contact details, or unable to perform a core requested workflow.
+- Do not ask optional preference, UI polish, feature expansion, tone, copywriting, or "nice to have" questions.
+- Do not ask for the Telegram/BotFather token. BotMother collects it after this check and injects it as BOT_TOKEN.
+- Do not ask for BOT_DB_PATH, PATH, PYTHONUNBUFFERED, or PYTHONIOENCODING. BotMother provides runtime env vars:
+{RUNTIME_ENV_CONTRACT}
+- Use type "ready" when no essential runtime data is missing.
+- Use type "questions" only when one or more essential values are missing.
+- Ask 1 to 3 questions at a time.
+- For type "questions", put the full natural-language follow-up message in "message" in the user's language/style.
+- BotMother will show only "message" to the user. It will not separately print question numbers, labels, suggestions, or follow-up counters.
+- Keep "questions" as internal structured state that mirrors the actual questions asked in "message".
+"""
+
+
 FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 QUESTION_KEYS = {"id", "question", "suggestions"}
 ENV_KEYS = {"name", "value"}
 TOP_LEVEL_KEYS = {"type", "message", "questions", "code", "env"}
+READINESS_KEYS = {"type", "message", "questions"}
 
 
 class AIResponseError(RuntimeError):
@@ -116,6 +165,17 @@ class AIDecision:
     questions: tuple[AIQuestion, ...] = ()
     code: str | None = None
     env: tuple[AIEnvVar, ...] = ()
+
+    @property
+    def needs_questions(self) -> bool:
+        return self.type == "questions"
+
+
+@dataclass(frozen=True)
+class AIReadinessDecision:
+    type: str
+    message: str
+    questions: tuple[AIQuestion, ...] = ()
 
     @property
     def needs_questions(self) -> bool:
@@ -214,6 +274,61 @@ def parse_ai_decision(text: str) -> AIDecision:
     return AIDecision("code", message, (), code, tuple(env))
 
 
+def _parse_questions(data: dict[str, Any]) -> tuple[AIQuestion, ...]:
+    raw_questions = data.get("questions", [])
+    if not isinstance(raw_questions, list):
+        raise AIResponseError("AI JSON field 'questions' must be a list.")
+
+    questions: list[AIQuestion] = []
+    for index, item in enumerate(raw_questions):
+        if not isinstance(item, dict):
+            raise AIResponseError(f"Question #{index + 1} must be an object.")
+        extra_question = set(item) - QUESTION_KEYS
+        if extra_question:
+            raise AIResponseError(f"Question #{index + 1} has unexpected fields: {', '.join(sorted(extra_question))}")
+        suggestions = item.get("suggestions", [])
+        if not isinstance(suggestions, list) or not all(isinstance(s, str) for s in suggestions):
+            raise AIResponseError(f"Question #{index + 1} suggestions must be a list of strings.")
+        questions.append(
+            AIQuestion(
+                id=_expect_str(item.get("id"), f"questions[{index}].id"),
+                question=_expect_str(item.get("question"), f"questions[{index}].question"),
+                suggestions=tuple(s.strip() for s in suggestions if s.strip()),
+            )
+        )
+    return tuple(questions)
+
+
+def parse_readiness_decision(text: str) -> AIReadinessDecision:
+    try:
+        data = json.loads(_strip_json_fence(text))
+    except json.JSONDecodeError as exc:
+        raise AIResponseError(f"AI returned invalid readiness JSON: {exc.msg}") from exc
+
+    if not isinstance(data, dict):
+        raise AIResponseError("AI readiness JSON must be an object.")
+    extra = set(data) - READINESS_KEYS
+    if extra:
+        raise AIResponseError(f"AI readiness JSON has unexpected fields: {', '.join(sorted(extra))}")
+
+    decision_type = _expect_str(data.get("type"), "type")
+    if decision_type not in {"ready", "questions"}:
+        raise AIResponseError("AI readiness JSON field 'type' must be 'ready' or 'questions'.")
+    message = _expect_str(data.get("message", ""), "message", allow_empty=True).strip()
+    questions = _parse_questions(data)
+
+    if decision_type == "ready":
+        if questions:
+            raise AIResponseError("AI readiness JSON type 'ready' must not include questions.")
+        return AIReadinessDecision("ready", message, ())
+
+    if not questions:
+        raise AIResponseError("AI readiness JSON type 'questions' requires at least one question.")
+    if len(questions) > 3:
+        raise AIResponseError("AI readiness JSON may ask at most 3 questions at a time.")
+    return AIReadinessDecision("questions", message, questions)
+
+
 def format_answer_history(answer_history: list[dict[str, Any]]) -> str:
     if not answer_history:
         return "No follow-up questions have been answered yet."
@@ -253,6 +368,21 @@ class GeminiCodeGenerator:
             raise AIResponseError("Gemini returned an empty JSON decision.")
         return text
 
+    def _generate_readiness_text(self, prompt: str) -> str:
+        response = self._client.models.generate_content(
+            model=self.model,
+            contents=prompt,
+            config={
+                "system_instruction": READINESS_SYSTEM_PROMPT,
+                "response_mime_type": "application/json",
+            },
+        )
+        text = getattr(response, "text", None)
+        if not text:
+            logger.error("Gemini returned an empty readiness decision")
+            raise AIResponseError("Gemini returned an empty readiness decision.")
+        return text
+
     def _build_json_repair_prompt(self, original_prompt: str, invalid_text: str, error: str, attempt: int) -> str:
         return (
             "Your previous response did not match BotMother's required JSON schema.\n"
@@ -285,6 +415,20 @@ class GeminiCodeGenerator:
             (),
         )
 
+    def _fallback_readiness_questions_after_bad_json(self, error: str) -> AIReadinessDecision:
+        logger.error("Gemini readiness decision remained invalid after repair attempts: %s", error)
+        return AIReadinessDecision(
+            "questions",
+            "I need one more essential detail before this bot can be launched. Please describe any required admin IDs, API keys, payment/contact details, or external service settings.",
+            (
+                AIQuestion(
+                    "missing_runtime_data",
+                    "What essential admin IDs, API keys, payment/contact details, or external service settings does this bot need to run?",
+                    ("No extra settings are needed", "I will provide the missing values here"),
+                ),
+            ),
+        )
+
     def _generate_json_decision(self, prompt: str) -> AIDecision:
         current_prompt = prompt
         last_error = "Unknown AI response error."
@@ -313,6 +457,48 @@ class GeminiCodeGenerator:
             )
             return decision
         return self._fallback_questions_after_bad_json(last_error)
+
+    def _build_readiness_repair_prompt(self, original_prompt: str, invalid_text: str, error: str, attempt: int) -> str:
+        return (
+            "Your previous readiness response did not match BotMother's required JSON schema.\n"
+            f"Repair attempt {attempt}/{MAX_JSON_REPAIR_ATTEMPTS}.\n\n"
+            f"Validation error:\n{error}\n\n"
+            "Remember: return type \"ready\" only when no essential runtime data is missing, "
+            "or type \"questions\" only for missing data required to run the bot. "
+            "Do not ask for the Telegram token.\n\n"
+            "Original readiness context:\n"
+            f"{original_prompt}\n\n"
+            "Your invalid response was:\n"
+            f"{invalid_text.strip()[:6000]}\n\n"
+            "Return one corrected JSON object only. No Markdown and no prose outside JSON."
+        )
+
+    def _generate_readiness_decision(self, prompt: str) -> AIReadinessDecision:
+        current_prompt = prompt
+        last_error = "Unknown AI readiness response error."
+        for attempt in range(MAX_JSON_REPAIR_ATTEMPTS + 1):
+            text = ""
+            try:
+                text = self._generate_readiness_text(current_prompt)
+                decision = parse_readiness_decision(text)
+            except AIResponseError as exc:
+                last_error = str(exc)
+                if attempt >= MAX_JSON_REPAIR_ATTEMPTS:
+                    return self._fallback_readiness_questions_after_bad_json(last_error)
+                logger.warning(
+                    "Gemini readiness decision invalid; requesting repair: attempt=%s error=%s",
+                    attempt + 1,
+                    exc,
+                )
+                current_prompt = self._build_readiness_repair_prompt(prompt, text, last_error, attempt + 1)
+                continue
+            logger.info(
+                "Gemini readiness decision: type=%s questions=%s",
+                decision.type,
+                len(decision.questions),
+            )
+            return decision
+        return self._fallback_readiness_questions_after_bad_json(last_error)
 
     def decide_new_bot(self, user_prompt: str, answer_history: list[dict[str, Any]], force_code: bool = False) -> AIDecision:
         logger.info(
@@ -361,6 +547,36 @@ class GeminiCodeGenerator:
         )
         return self._generate_json_decision(prompt)
 
+    def check_new_bot_readiness(
+        self,
+        user_prompt: str,
+        answer_history: list[dict[str, Any]],
+        decision: AIDecision,
+    ) -> AIReadinessDecision:
+        logger.info(
+            "Checking new bot readiness: model=%s prompt_chars=%s answer_rounds=%s code_chars=%s env=%s",
+            self.model,
+            len(user_prompt),
+            len(answer_history),
+            len(decision.code or ""),
+            len(decision.env),
+        )
+        env_names = ", ".join(item.name for item in decision.env) if decision.env else "none"
+        prompt = (
+            "Final readiness check before asking the user for the child BotFather token.\n\n"
+            "BotMother will collect the child BotFather token next and inject it as BOT_TOKEN. "
+            "Do not ask for the Telegram token.\n\n"
+            f"Original request:\n{user_prompt.strip()}\n\n"
+            f"Follow-up history:\n{format_answer_history(answer_history)}\n\n"
+            f"Generated code message:\n{decision.message.strip()}\n\n"
+            f"Provided child env var names and values from prior user answers: {env_names}\n\n"
+            "Generated source:\n"
+            "```python\n"
+            f"{(decision.code or '').strip()}\n"
+            "```"
+        )
+        return self._generate_readiness_decision(prompt)
+
     def generate_code(self, user_prompt: str) -> str:
         logger.info("Generating child bot code: model=%s prompt_chars=%s", self.model, len(user_prompt))
         prompt = (
@@ -407,3 +623,80 @@ class GeminiCodeGenerator:
             return text
         logger.error("Gemini returned an empty edit response")
         raise RuntimeError("Gemini returned an empty edit response.")
+
+    def refine_code_for_deploy(
+        self,
+        user_prompt: str,
+        current_code: str,
+        env_names: list[str],
+        layer: int,
+        total_layers: int,
+        validation_error: str | None = None,
+    ) -> str:
+        logger.info(
+            "Refining child bot code: model=%s layer=%s/%s code_chars=%s validation_error=%s",
+            self.model,
+            layer,
+            total_layers,
+            len(current_code),
+            validation_error or "-",
+        )
+        focus = {
+            1: "requirements coverage and missing edge cases without adding new requirements",
+            2: "runtime reliability, async handler correctness, SQLite safety, and graceful error handling",
+            3: "final deployment polish, clear user messages, startup robustness, and no forbidden APIs",
+        }.get(layer, "deployment readiness and correctness")
+        prompt = (
+            "Refine this generated Telegram child bot before deployment.\n\n"
+            "Return only the complete standalone Python source file. No Markdown, JSON, explanation, or diff.\n\n"
+            f"Layer {layer}/{total_layers} focus: {focus}.\n"
+            "Keep the same requested behavior. Do not add optional features or ask questions.\n"
+            "Keep the BotMother runtime contract: read BOT_TOKEN and BOT_DB_PATH from os.environ.\n"
+            "Do not hardcode tokens or secrets. Do not require env vars except the provided names and BotMother runtime vars.\n"
+            "Keep using only Python standard library, sqlite3, and python-telegram-bot.\n"
+            "Do not import subprocess, socket, ctypes, importlib, or multiprocessing.\n"
+            "Do not call eval, exec, compile, __import__, os.system, os.remove, os.unlink, os.rmdir, os.rename, os.replace, shutil.move, or shutil.rmtree.\n\n"
+            f"Provided child env var names: {', '.join(env_names) if env_names else 'none'}\n"
+            f"Validation issue from previous layer: {validation_error or 'none'}\n\n"
+            f"Original user request:\n{user_prompt.strip()}\n\n"
+            "Current source:\n"
+            "```python\n"
+            f"{current_code.strip()}\n"
+            "```"
+        )
+        response = self._client.models.generate_content(
+            model=self.model,
+            contents=prompt,
+            config={"system_instruction": SYSTEM_PROMPT},
+        )
+        text = getattr(response, "text", None)
+        if text and text.strip():
+            logger.info("Gemini returned refined code: layer=%s chars=%s", layer, len(text))
+            return text
+        logger.error("Gemini returned an empty refinement response: layer=%s", layer)
+        raise RuntimeError("Gemini returned an empty refinement response.")
+
+    def answer_bot_question(self, bot_context: str, question: str) -> str:
+        logger.info(
+            "Answering bot question: model=%s context_chars=%s question_chars=%s",
+            self.model,
+            len(bot_context),
+            len(question),
+        )
+        prompt = (
+            "Bot context:\n"
+            f"{bot_context.strip()}\n\n"
+            "User question:\n"
+            f"{question.strip()}"
+        )
+        response = self._client.models.generate_content(
+            model=self.model,
+            contents=prompt,
+            config={"system_instruction": ASK_SYSTEM_PROMPT},
+        )
+        text = getattr(response, "text", None)
+        if text and text.strip():
+            logger.info("Gemini returned bot answer: chars=%s", len(text))
+            return text.strip()
+        logger.error("Gemini returned an empty bot answer")
+        raise RuntimeError("Gemini returned an empty answer.")

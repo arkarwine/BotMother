@@ -4,7 +4,7 @@ from html import escape
 import logging
 from typing import Any
 
-from .ai import AIDecision, MAX_FOLLOWUP_ROUNDS
+from .ai import AIDecision, AIReadinessDecision, MAX_FOLLOWUP_ROUNDS
 from .db import Database
 from .service import BotService, OperationResult
 
@@ -12,7 +12,7 @@ from .service import BotService, OperationResult
 logger = logging.getLogger(__name__)
 
 
-NEW_PROMPT, NEW_FOLLOWUP, NEW_TOKEN, REVISE_PROMPT, EDIT_PROMPT, EDIT_FOLLOWUP = range(6)
+NEW_PROMPT, NEW_FOLLOWUP, NEW_TOKEN, REVISE_PROMPT, EDIT_PROMPT, EDIT_FOLLOWUP, ASK_PROMPT = range(7)
 
 
 def parse_bot_id(args: list[str]) -> int | None:
@@ -41,6 +41,13 @@ def parse_tail_args(args: list[str], default_limit: int = 30, max_limit: int = 1
     if limit < 1:
         return bot_id, default_limit, "Lines must be at least 1."
     return bot_id, min(limit, max_limit), None
+
+
+def parse_ask_args(args: list[str]) -> tuple[int | None, str, str | None]:
+    bot_id = parse_bot_id(args)
+    if bot_id is None:
+        return None, "", "Usage: /ask <id> [question]"
+    return bot_id, " ".join(args[1:]).strip(), None
 
 
 def format_bot_list(rows: list[Any]) -> str:
@@ -82,11 +89,11 @@ def chunk_text(text: str, chunk_size: int = 3200) -> list[str]:
     return [text[index : index + chunk_size] for index in range(0, len(text), chunk_size)]
 
 
-def question_texts(decision: AIDecision) -> list[str]:
+def question_texts(decision: AIDecision | AIReadinessDecision) -> list[str]:
     return [question.question for question in decision.questions]
 
 
-def format_ai_questions(decision: AIDecision) -> str:
+def format_ai_questions(decision: AIDecision | AIReadinessDecision) -> str:
     if decision.message.strip():
         return decision.message.strip()
     if decision.questions:
@@ -133,6 +140,7 @@ def build_application(token: str, db: Database, service: BotService):
             "Use /bots to list your bots.\n"
             "Use /tail <id> to see child bot logs.\n"
             "Use /edit <id> to change a bot with a prompt.\n"
+            "Use /ask <id> to ask about a bot.\n"
             "The AI may ask follow-up questions before building."
         )
 
@@ -178,6 +186,19 @@ def build_application(token: str, db: Database, service: BotService):
                 return ConversationHandler.END
             context.user_data["newbot_pending_questions"] = question_texts(decision)
             await update.effective_message.reply_text(format_ai_questions(decision))
+            return NEW_FOLLOWUP
+
+        readiness = service.check_new_bot_readiness(prompt, answers, decision)
+        if readiness.needs_questions:
+            if force_code:
+                await update.effective_message.reply_text(
+                    "I still need an essential launch detail before I can generate this safely. "
+                    "Try /newbot again with the missing details included up front."
+                )
+                context.user_data.clear()
+                return ConversationHandler.END
+            context.user_data["newbot_pending_questions"] = question_texts(readiness)
+            await update.effective_message.reply_text(format_ai_questions(readiness))
             return NEW_FOLLOWUP
 
         context.user_data["newbot_decision"] = decision
@@ -256,6 +277,46 @@ def build_application(token: str, db: Database, service: BotService):
             f"<pre>{escape(format_logs(db.get_logs(bot_id, limit)))}</pre>",
             parse_mode=ParseMode.HTML,
         )
+
+    async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        user_id = _remember_user(db, update)
+        bot_id, question, error = parse_ask_args(context.args)
+        logger.info("Command /ask: user_id=%s bot_id=%s question_chars=%s", user_id, bot_id, len(question))
+        if error is not None:
+            await update.effective_message.reply_text(error)
+            return ConversationHandler.END
+        if not service.can_manage(user_id, bot_id):
+            await update.effective_message.reply_text("Bot not found, or you do not have access.")
+            return ConversationHandler.END
+        if question:
+            return await answer_bot_question(update, context, user_id, bot_id, question)
+        context.user_data["ask_bot_id"] = bot_id
+        await update.effective_message.reply_text(f"What do you want to know about bot #{bot_id}?")
+        return ASK_PROMPT
+
+    async def ask_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        user_id = _remember_user(db, update)
+        bot_id = int(context.user_data["ask_bot_id"])
+        question = (update.effective_message.text or "").strip()
+        if not question:
+            await update.effective_message.reply_text("Ask a question about the bot, or use /cancel.")
+            return ASK_PROMPT
+        return await answer_bot_question(update, context, user_id, bot_id, question)
+
+    async def answer_bot_question(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        user_id: int,
+        bot_id: int,
+        question: str,
+    ) -> int:
+        await update.effective_message.reply_text("Checking that bot...")
+        result = service.ask_bot(user_id, bot_id, question)
+        logger.info("Ask bot result: user_id=%s bot_id=%s ok=%s", user_id, bot_id, result.ok)
+        for chunk in chunk_text(result.message):
+            await update.effective_message.reply_text(chunk)
+        context.user_data.pop("ask_bot_id", None)
+        return ConversationHandler.END
 
     async def source(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
@@ -431,6 +492,7 @@ def build_application(token: str, db: Database, service: BotService):
                 BotCommand("bots", "List your child bots"),
                 BotCommand("status", "Show bot status, or list all bots"),
                 BotCommand("tail", "Show child bot logs"),
+                BotCommand("ask", "Ask about a child bot"),
                 BotCommand("edit", "Change a child bot with prompts"),
                 BotCommand("delete", "Stop and delete a child bot"),
                 BotCommand("stop", "Stop a child bot"),
@@ -482,6 +544,14 @@ def build_application(token: str, db: Database, service: BotService):
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
+    ask_conv = ConversationHandler(
+        entry_points=[CommandHandler("ask", ask)],
+        states={
+            ASK_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_prompt)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
     application = (
         ApplicationBuilder()
         .token(token)
@@ -493,6 +563,7 @@ def build_application(token: str, db: Database, service: BotService):
     application.add_handler(newbot_conv)
     application.add_handler(revise_conv)
     application.add_handler(edit_conv)
+    application.add_handler(ask_conv)
     application.add_handler(CommandHandler("bots", bots))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("tail", tail))

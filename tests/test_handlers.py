@@ -1,7 +1,15 @@
 import unittest
 
 from botmother.ai import AIDecision, AIQuestion
-from botmother.handlers import chunk_text, format_ai_questions, format_bot_list, format_logs, parse_bot_id, parse_tail_args
+from botmother.handlers import (
+    chunk_text,
+    format_ai_questions,
+    format_bot_list,
+    format_logs,
+    parse_ask_args,
+    parse_bot_id,
+    parse_tail_args,
+)
 
 
 class FakeRow(dict):
@@ -36,6 +44,24 @@ class HandlerHelperTests(unittest.TestCase):
         self.assertEqual(bot_id, 12)
         self.assertEqual(limit, 30)
         self.assertIn("number", error)
+
+    def test_parse_ask_args_accepts_inline_question(self):
+        bot_id, question, error = parse_ask_args(["12", "what", "does", "it", "do?"])
+        self.assertEqual(bot_id, 12)
+        self.assertEqual(question, "what does it do?")
+        self.assertIsNone(error)
+
+    def test_parse_ask_args_allows_prompt_flow(self):
+        bot_id, question, error = parse_ask_args(["12"])
+        self.assertEqual(bot_id, 12)
+        self.assertEqual(question, "")
+        self.assertIsNone(error)
+
+    def test_parse_ask_args_requires_bot_id(self):
+        bot_id, question, error = parse_ask_args([])
+        self.assertIsNone(bot_id)
+        self.assertEqual(question, "")
+        self.assertIn("/ask", error)
 
     def test_format_empty_bot_list(self):
         self.assertIn("/newbot", format_bot_list([]))
