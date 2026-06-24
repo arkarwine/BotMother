@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 NEW_PROMPT, NEW_FOLLOWUP, NEW_TOKEN, REVISE_PROMPT, EDIT_PROMPT, EDIT_FOLLOWUP, ASK_PROMPT = range(7)
+BOT_NOT_FOUND_TEXT = "🔎 Bot not found, or you do not have access."
 
 STATUS_EMOJI = {
     "running": "🟢",
@@ -387,8 +388,7 @@ def build_application(token: str, db: Database, service: BotService):
     async def examples(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
         logger.info("Command /examples: user_id=%s chat_id=%s", user_id, _chat_id(update))
-        await update.effective_message.reply_text(EXAMPLES_TEXT, reply_markup=main_keyboard)
-        await update.effective_message.reply_text("🪄 Ready to build?", reply_markup=help_category_keyboard("create"))
+        await update.effective_message.reply_text(EXAMPLES_TEXT)
 
     async def identity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
@@ -398,7 +398,6 @@ def build_application(token: str, db: Database, service: BotService):
             f"🪪 Your Telegram user ID: {user_id}\n"
             f"Chat ID: {chat_id}\n\n"
             "Use this as an admin ID when creating bots that need admin-only commands.",
-            reply_markup=main_keyboard,
         )
 
     async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -414,9 +413,7 @@ def build_application(token: str, db: Database, service: BotService):
             f"Scope: {scope}\n"
             f"Visible bots: {len(rows)}\n"
             f"Running in DB: {running_visible}\n"
-            f"Active child processes: {active_count}\n\n"
-            "Use the keyboard or help menu for the next action.",
-            reply_markup=help_category_keyboard("ops"),
+            f"Active child processes: {active_count}",
         )
 
     async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -513,7 +510,7 @@ def build_application(token: str, db: Database, service: BotService):
         token_text = (update.effective_message.text or "").strip()
         logger.info("Received newbot token; creating bot: user_id=%s prompt_chars=%s", user_id, len(prompt))
         if not isinstance(decision, AIDecision):
-            await update.effective_message.reply_text("⌛ The AI plan expired. Use /newbot to start again.")
+            await update.effective_message.reply_text("⌛ The AI plan expired. Tap New Bot to start again.")
             context.user_data.clear()
             return ConversationHandler.END
         await update.effective_message.reply_text("🚀 Refining, validating, sandboxing, and launching the child bot...")
@@ -539,9 +536,9 @@ def build_application(token: str, db: Database, service: BotService):
             return
         row = service.get_accessible_bot(user_id, bot_id)
         if row is None:
-            await update.effective_message.reply_text("🔎 Bot not found, or you do not have access.\nUse /bots to see available bot IDs.")
+            await update.effective_message.reply_text(BOT_NOT_FOUND_TEXT)
             return
-        await update.effective_message.reply_text(format_bot_status(row), reply_markup=bot_actions_keyboard(bot_id))
+        await update.effective_message.reply_text(format_bot_status(row))
 
     async def tail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
@@ -556,12 +553,11 @@ def build_application(token: str, db: Database, service: BotService):
             return
         row = service.get_accessible_bot(user_id, bot_id)
         if row is None:
-            await update.effective_message.reply_text("🔎 Bot not found, or you do not have access.\nUse /bots to see available bot IDs.")
+            await update.effective_message.reply_text(BOT_NOT_FOUND_TEXT)
             return
         await update.effective_message.reply_text(
             f"<pre>{escape(format_logs(db.get_logs(bot_id, limit)))}</pre>",
             parse_mode=ParseMode.HTML,
-            reply_markup=bot_actions_keyboard(bot_id),
         )
 
     async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -575,7 +571,7 @@ def build_application(token: str, db: Database, service: BotService):
             await update.effective_message.reply_text(error)
             return ConversationHandler.END
         if not service.can_manage(user_id, bot_id):
-            await update.effective_message.reply_text("🔎 Bot not found, or you do not have access.\nUse /bots to see available bot IDs.")
+            await update.effective_message.reply_text(BOT_NOT_FOUND_TEXT)
             return ConversationHandler.END
         if question:
             return await answer_bot_question(update, context, user_id, bot_id, question)
@@ -586,7 +582,6 @@ def build_application(token: str, db: Database, service: BotService):
             f"Why did bot #{bot_id} stop?\n"
             f"What commands does bot #{bot_id} support?\n"
             f"How should I edit bot #{bot_id} to add payments?",
-            reply_markup=bot_actions_keyboard(bot_id),
         )
         return ASK_PROMPT
 
@@ -610,7 +605,7 @@ def build_application(token: str, db: Database, service: BotService):
         result = service.ask_bot(user_id, bot_id, question)
         logger.info("Ask bot result: user_id=%s bot_id=%s ok=%s", user_id, bot_id, result.ok)
         for chunk in chunk_text(result.message):
-            await update.effective_message.reply_text(chunk, reply_markup=bot_actions_keyboard(bot_id))
+            await update.effective_message.reply_text(chunk)
         context.user_data.pop("ask_bot_id", None)
         return ConversationHandler.END
 
@@ -669,12 +664,11 @@ def build_application(token: str, db: Database, service: BotService):
         user_id = _remember_user(db, update)
         bot_id = int((query.data if query else "").split(":", 1)[1])
         if not service.can_manage(user_id, bot_id):
-            await update.effective_message.reply_text("🔎 Bot not found, or you do not have access.", reply_markup=main_keyboard)
+            await update.effective_message.reply_text(BOT_NOT_FOUND_TEXT)
             return ConversationHandler.END
         context.user_data["ask_bot_id"] = bot_id
         await update.effective_message.reply_text(
             f"💬 What do you want to know about bot #{bot_id}?",
-            reply_markup=bot_actions_keyboard(bot_id),
         )
         return ASK_PROMPT
 
@@ -685,12 +679,11 @@ def build_application(token: str, db: Database, service: BotService):
         user_id = _remember_user(db, update)
         bot_id = int((query.data if query else "").split(":", 1)[1])
         if not service.can_manage(user_id, bot_id):
-            await update.effective_message.reply_text("🔎 Bot not found, or you do not have access.", reply_markup=main_keyboard)
+            await update.effective_message.reply_text(BOT_NOT_FOUND_TEXT)
             return ConversationHandler.END
         context.user_data["edit_bot_id"] = bot_id
         await update.effective_message.reply_text(
             f"✏️ Describe what you want to change in bot #{bot_id}.",
-            reply_markup=bot_actions_keyboard(bot_id),
         )
         return EDIT_PROMPT
 
@@ -701,13 +694,12 @@ def build_application(token: str, db: Database, service: BotService):
         user_id = _remember_user(db, update)
         bot_id = int((query.data if query else "").split(":", 1)[1])
         if not service.can_manage(user_id, bot_id):
-            await update.effective_message.reply_text("🔎 Bot not found, or you do not have access.", reply_markup=main_keyboard)
+            await update.effective_message.reply_text(BOT_NOT_FOUND_TEXT)
             return ConversationHandler.END
         context.user_data["revise_bot_id"] = bot_id
         await update.effective_message.reply_text(
             f"♻️ Describe the new complete version of bot #{bot_id}.\n\n"
             "Use this when the bot should be rebuilt from a fresh prompt. For a smaller change, tap Edit.",
-            reply_markup=bot_actions_keyboard(bot_id),
         )
         return REVISE_PROMPT
 
@@ -725,8 +717,7 @@ def build_application(token: str, db: Database, service: BotService):
             await update.effective_message.reply_text("📚 Choose a help category:", reply_markup=help_menu_keyboard())
             return
         if data == "nav:examples":
-            await update.effective_message.reply_text(EXAMPLES_TEXT, reply_markup=main_keyboard)
-            await update.effective_message.reply_text("🪄 Ready to build?", reply_markup=help_category_keyboard("create"))
+            await update.effective_message.reply_text(EXAMPLES_TEXT)
             return
         if data == "nav:bots":
             rows = service.list_bots_for(user_id)
@@ -737,7 +728,6 @@ def build_application(token: str, db: Database, service: BotService):
                 f"🪪 Your Telegram user ID: {user_id}\n"
                 f"Chat ID: {_chat_id(update)}\n\n"
                 "Use this as an admin ID when a bot needs admin-only controls.",
-                reply_markup=main_keyboard,
             )
             return
         if data == "nav:cancel":
@@ -753,7 +743,6 @@ def build_application(token: str, db: Database, service: BotService):
                 f"Visible bots: {len(rows)}\n"
                 f"Running in DB: {running_visible}\n"
                 f"Active child processes: {active_count}",
-                reply_markup=help_category_keyboard("ops"),
             )
             return
         if data.startswith("help:"):
@@ -787,24 +776,23 @@ def build_application(token: str, db: Database, service: BotService):
             return
 
         if not service.can_manage(user_id, bot_id):
-            await update.effective_message.reply_text("🔎 Bot not found, or you do not have access.", reply_markup=main_keyboard)
+            await update.effective_message.reply_text(BOT_NOT_FOUND_TEXT)
             return
 
         if action == "status":
             row = service.get_accessible_bot(user_id, bot_id)
-            await update.effective_message.reply_text(format_bot_status(row), reply_markup=bot_actions_keyboard(bot_id))
+            await update.effective_message.reply_text(format_bot_status(row))
         elif action == "tail":
             await update.effective_message.reply_text(
                 f"<pre>{escape(format_logs(db.get_logs(bot_id, 50)))}</pre>",
                 parse_mode=ParseMode.HTML,
-                reply_markup=bot_actions_keyboard(bot_id),
             )
         elif action == "restart":
             result = await service.restart_bot(user_id, bot_id)
-            await update.effective_message.reply_text(result.message, reply_markup=bot_actions_keyboard(bot_id))
+            await update.effective_message.reply_text(result.message)
         elif action == "stop":
             result = await service.stop_bot(user_id, bot_id)
-            await update.effective_message.reply_text(result.message, reply_markup=bot_actions_keyboard(bot_id))
+            await update.effective_message.reply_text(result.message)
         elif action == "delete_confirm":
             await update.effective_message.reply_text(
                 f"🗑️ Delete bot #{bot_id}? This stops it and frees its token.",
@@ -819,7 +807,7 @@ def build_application(token: str, db: Database, service: BotService):
             )
         elif action == "delete":
             result = await service.delete_bot(user_id, bot_id)
-            await update.effective_message.reply_text(result.message, reply_markup=main_keyboard)
+            await update.effective_message.reply_text(result.message)
 
     async def source(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
@@ -853,7 +841,7 @@ def build_application(token: str, db: Database, service: BotService):
             await choose_bot_for_action(update, "stop", "🛑 Choose a bot to stop:")
             return
         result = await service.stop_bot(user_id, bot_id)
-        await update.effective_message.reply_text(result.message, reply_markup=bot_actions_keyboard(bot_id))
+        await update.effective_message.reply_text(result.message)
 
     async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
@@ -863,7 +851,7 @@ def build_application(token: str, db: Database, service: BotService):
             await choose_bot_for_action(update, "restart", "🔄 Choose a bot to restart:")
             return
         result = await service.restart_bot(user_id, bot_id)
-        await update.effective_message.reply_text(result.message, reply_markup=bot_actions_keyboard(bot_id))
+        await update.effective_message.reply_text(result.message)
 
     async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
@@ -873,13 +861,13 @@ def build_application(token: str, db: Database, service: BotService):
             await choose_bot_for_action(update, "delete_confirm", "🗑️ Choose a bot to delete:")
             return
         result = await service.delete_bot(user_id, bot_id)
-        await update.effective_message.reply_text(result.message, reply_markup=bot_actions_keyboard(bot_id))
+        await update.effective_message.reply_text(result.message)
 
     async def killall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
         logger.warning("Command /killall: user_id=%s", user_id)
         result = await service.kill_all(user_id)
-        await update.effective_message.reply_text(result.message, reply_markup=main_keyboard)
+        await update.effective_message.reply_text(result.message)
 
     async def revise(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         user_id = _remember_user(db, update)
@@ -889,7 +877,7 @@ def build_application(token: str, db: Database, service: BotService):
             await choose_bot_for_action(update, "revise", "♻️ Choose a bot to regenerate:")
             return ConversationHandler.END
         if not service.can_manage(user_id, bot_id):
-            await update.effective_message.reply_text("🔎 Bot not found, or you do not have access.\nUse /bots to see available bot IDs.")
+            await update.effective_message.reply_text(BOT_NOT_FOUND_TEXT)
             return ConversationHandler.END
         context.user_data["revise_bot_id"] = bot_id
         await update.effective_message.reply_text(
@@ -909,7 +897,7 @@ def build_application(token: str, db: Database, service: BotService):
         await update.effective_message.reply_text("♻️ Regenerating, refining, validating, and restarting the child bot...")
         result = await service.revise_bot(user_id, bot_id, prompt)
         logger.info("Revise bot result: user_id=%s bot_id=%s ok=%s", user_id, bot_id, result.ok)
-        await update.effective_message.reply_text(result.message, reply_markup=bot_actions_keyboard(bot_id))
+        await update.effective_message.reply_text(result.message)
         context.user_data.pop("revise_bot_id", None)
         return ConversationHandler.END
 
@@ -921,7 +909,7 @@ def build_application(token: str, db: Database, service: BotService):
             await choose_bot_for_action(update, "edit", "✏️ Choose a bot to edit:")
             return ConversationHandler.END
         if not service.can_manage(user_id, bot_id):
-            await update.effective_message.reply_text("🔎 Bot not found, or you do not have access.\nUse /bots to see available bot IDs.")
+            await update.effective_message.reply_text(BOT_NOT_FOUND_TEXT)
             return ConversationHandler.END
         context.user_data["edit_bot_id"] = bot_id
         await update.effective_message.reply_text(
@@ -930,8 +918,7 @@ def build_application(token: str, db: Database, service: BotService):
             "Add a /help command with examples.\n"
             "Make checkout ask for phone number and address.\n"
             "Improve error messages and admin notifications.\n\n"
-            "The AI may ask follow-up questions. Use /cancel to abort.",
-            reply_markup=bot_actions_keyboard(bot_id),
+            "The AI may ask follow-up questions. Tap Cancel to abort.",
         )
         return EDIT_PROMPT
 
