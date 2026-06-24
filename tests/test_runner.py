@@ -1,10 +1,12 @@
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from botmother.config import Settings
 from botmother.db import Database
-from botmother.runner import ProcessManager
+from botmother.runner import MAX_UNEXPECTED_SIGNAL_RESTARTS, ProcessManager, format_return_code, is_signal_exit
 
 
 def make_settings(tmp: str) -> Settings:
@@ -22,6 +24,51 @@ def make_settings(tmp: str) -> Settings:
 
 
 class RunnerTests(unittest.TestCase):
+    def test_format_return_code_names_signals(self):
+        self.assertEqual(format_return_code(-2), "-2 (SIGINT)")
+        self.assertEqual(format_return_code(1), "1")
+        self.assertEqual(format_return_code(None), "unknown")
+
+    def test_is_signal_exit(self):
+        self.assertTrue(is_signal_exit(-2))
+        self.assertFalse(is_signal_exit(0))
+        self.assertFalse(is_signal_exit(1))
+        self.assertFalse(is_signal_exit(None))
+
+    def test_unexpected_signal_restart_is_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = make_settings(tmp)
+            db = Database(settings.db_path)
+            db.initialize()
+            db.upsert_user(1, "owner", None, None)
+            bot_id = db.create_bot(
+                1,
+                100,
+                "Echo",
+                "make echo",
+                "12345:abcdefghijklmnopqrstuvwxyzABCDE",
+                settings.workdir / "1",
+            )
+            manager = ProcessManager(settings, db)
+            started = []
+
+            async def fake_start_bot(bot_id: int) -> None:
+                started.append(bot_id)
+
+            manager.start_bot = fake_start_bot
+
+            with patch("botmother.runner.UNEXPECTED_SIGNAL_RESTART_DELAY_SECONDS", 0):
+                asyncio.run(manager._restart_after_unexpected_signal(bot_id, "-2 (SIGINT)"))
+
+            self.assertEqual(started, [bot_id])
+            self.assertEqual(manager.unexpected_signal_restarts[bot_id], 1)
+
+            manager.unexpected_signal_restarts[bot_id] = MAX_UNEXPECTED_SIGNAL_RESTARTS
+            with patch("botmother.runner.UNEXPECTED_SIGNAL_RESTART_DELAY_SECONDS", 0):
+                asyncio.run(manager._restart_after_unexpected_signal(bot_id, "-2 (SIGINT)"))
+
+            self.assertEqual(started, [bot_id])
+
     def test_sandbox_command_does_not_include_token(self):
         with tempfile.TemporaryDirectory() as tmp:
             settings = make_settings(tmp)

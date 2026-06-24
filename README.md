@@ -125,12 +125,14 @@ tail -f ./data/botmother.log
 
 Child bot stdout/stderr is still available through `/tail <id>`, `/logs <id>`, and per-bot files under `data/bots/<id>/`.
 
+Negative child process return codes mean Linux signals. For example, `rc=-2` is `SIGINT`. BotMother logs signal names and will retry unexpected signal exits a bounded number of times.
+
 ## Prompt Editing
 
 Use `/edit <id>`, then describe the change you want in normal language, for example `add a /help command` or `make the bot remember birthdays`. BotMother lets the AI ask follow-up questions, edits the existing generated Python internally, validates the new revision, saves it, and restarts the child bot when the edit is valid.
 
 ## AI Follow-Ups
 
-For `/newbot` and `/edit`, BotMother asks Gemini for a strict JSON decision. The decision type is either `questions` or `code`. When the AI returns questions, BotMother asks the user and sends the answers back into the next AI turn. To avoid endless loops, BotMother allows up to 5 follow-up rounds, then forces a final code decision or ends the flow if the AI still cannot proceed safely.
+For `/newbot` and `/edit`, BotMother asks Gemini for a strict JSON decision. The decision type is either `questions` or `code`. When the AI returns questions, BotMother sends Gemini's user-facing message directly, then sends the user's answer back into the next AI turn. The structured question fields are internal only, so BotMother does not add visible question numbers, suggestion labels, or follow-up counters. To avoid endless loops, BotMother allows up to 5 internal follow-up rounds, then forces a final code decision or ends the flow if the AI still cannot proceed safely.
 
 Planner JSON repair is also bounded. If Gemini returns invalid JSON or tries to set reserved runtime env vars such as `BOT_TOKEN`, BotMother sends the validation error back to Gemini for up to 2 repair attempts, then falls back to asking the user to restate the request.

@@ -1,6 +1,7 @@
 import unittest
 
-from botmother.handlers import chunk_text, format_bot_list, format_logs, parse_bot_id, parse_tail_args
+from botmother.ai import AIDecision, AIQuestion
+from botmother.handlers import chunk_text, format_ai_questions, format_bot_list, format_logs, parse_bot_id, parse_tail_args
 
 
 class FakeRow(dict):
@@ -51,6 +52,24 @@ class HandlerHelperTests(unittest.TestCase):
     def test_chunk_text(self):
         self.assertEqual(chunk_text("abcdef", 2), ["ab", "cd", "ef"])
         self.assertEqual(chunk_text("", 2), [""])
+
+    def test_format_ai_questions_uses_ai_message_verbatim(self):
+        decision = AIDecision(
+            "questions",
+            "Admin ID တွေ ပေးပါ။ KPay ကို ဖုန်းနံပါတ်နဲ့ပြမလား၊ QR နဲ့ပြမလား?",
+            (
+                AIQuestion("admin_ids", "Admin IDs?", ("123456789",)),
+                AIQuestion("payment", "Payment display?", ("Phone only", "QR")),
+            ),
+            None,
+            (),
+        )
+
+        text = format_ai_questions(decision)
+
+        self.assertEqual(text, decision.message)
+        self.assertNotIn("Suggestions:", text)
+        self.assertNotIn("Follow-up", text)
 
 
 if __name__ == "__main__":

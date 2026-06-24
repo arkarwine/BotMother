@@ -86,14 +86,12 @@ def question_texts(decision: AIDecision) -> list[str]:
     return [question.question for question in decision.questions]
 
 
-def format_ai_questions(decision: AIDecision, round_number: int) -> str:
-    lines = [decision.message or "I need a little more detail before building."]
-    for index, question in enumerate(decision.questions, start=1):
-        lines.append(f"{index}. {question.question}")
-        if question.suggestions:
-            lines.append("Suggestions: " + "; ".join(question.suggestions))
-    lines.append(f"Reply with your answers. Follow-up {round_number}/{MAX_FOLLOWUP_ROUNDS}.")
-    return "\n".join(lines)
+def format_ai_questions(decision: AIDecision) -> str:
+    if decision.message.strip():
+        return decision.message.strip()
+    if decision.questions:
+        return "\n\n".join(question.question for question in decision.questions)
+    return "I need a little more detail before building."
 
 
 def _user_tuple(update: Any) -> tuple[int, str | None, str | None, str | None]:
@@ -173,13 +171,13 @@ def build_application(token: str, db: Database, service: BotService):
         if decision.needs_questions:
             if force_code:
                 await update.effective_message.reply_text(
-                    "I hit the follow-up limit and the AI still was not ready to generate safely. "
+                    "I still need more detail before I can generate this safely. "
                     "Try /newbot again with the missing details included up front."
                 )
                 context.user_data.clear()
                 return ConversationHandler.END
             context.user_data["newbot_pending_questions"] = question_texts(decision)
-            await update.effective_message.reply_text(format_ai_questions(decision, len(answers) + 1))
+            await update.effective_message.reply_text(format_ai_questions(decision))
             return NEW_FOLLOWUP
 
         context.user_data["newbot_decision"] = decision
@@ -392,13 +390,13 @@ def build_application(token: str, db: Database, service: BotService):
         if decision.needs_questions:
             if force_code:
                 await update.effective_message.reply_text(
-                    "I hit the follow-up limit and the AI still was not ready to edit safely. "
+                    "I still need more detail before I can edit this safely. "
                     "Try /edit again with the missing details included up front."
                 )
                 context.user_data.clear()
                 return ConversationHandler.END
             context.user_data["edit_pending_questions"] = question_texts(decision)
-            await update.effective_message.reply_text(format_ai_questions(decision, len(answers) + 1))
+            await update.effective_message.reply_text(format_ai_questions(decision))
             return EDIT_FOLLOWUP
 
         await update.effective_message.reply_text("Validating edited code and restarting the child bot...")

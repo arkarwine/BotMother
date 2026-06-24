@@ -53,7 +53,7 @@ Before generating code, decide whether you understand the user's requested bot w
 Return exactly one JSON object matching this schema:
 {{
   "type": "questions" | "code",
-  "message": "short user-facing message",
+  "message": "complete user-facing message BotMother can send verbatim",
   "questions": [
     {{
       "id": "lower_snake_case_id",
@@ -72,7 +72,11 @@ Rules:
 - Use type "questions" when important requirements, behavior, storage, commands, admin policy, schedules, external services, or env vars are unclear.
 - Ask 1 to 3 questions at a time.
 - Ask only questions that materially change the implementation.
-- Include practical suggestions when helpful.
+- For type "questions", put the full natural-language follow-up message in "message" in the user's language/style.
+- BotMother will show only "message" to the user. It will not separately print question numbers, labels, suggestions, or follow-up counters.
+- Keep "questions" as internal structured state that mirrors the actual questions asked in "message".
+- Include practical suggestions naturally inside "message" when helpful. Do not use labels like "Suggestions:".
+- Do not mention JSON, schema fields, internal limits, or follow-up counts to the user.
 - Use type "code" only when ready to generate a complete standalone bot.py.
 - Include env entries only for values the user explicitly provided in this conversation. Do not invent secrets.
 - If an external API key or config value is needed and not provided, ask for it.
