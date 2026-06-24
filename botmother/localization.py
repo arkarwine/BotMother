@@ -9,7 +9,19 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 DEFAULT_LOCALE = "en"
+SUPPORTED_LOCALES = {"en", "my"}
 LOCALES_DIR = Path(__file__).with_name("locales")
+
+
+def normalize_locale(locale: str | None) -> str:
+    value = (locale or "").strip().lower().replace("-", "_")
+    if value in {"my", "my_mm", "burmese", "myanmar"}:
+        return "my"
+    if value.startswith("my_"):
+        return "my"
+    if value in SUPPORTED_LOCALES:
+        return value
+    return DEFAULT_LOCALE
 
 
 @lru_cache(maxsize=8)
@@ -33,6 +45,7 @@ def load_locale(locale: str = DEFAULT_LOCALE) -> dict[str, str]:
 
 
 def t(key: str, locale: str = DEFAULT_LOCALE, **values: Any) -> str:
+    locale = normalize_locale(locale)
     text = load_locale(locale).get(key)
     if text is None and locale != DEFAULT_LOCALE:
         text = load_locale(DEFAULT_LOCALE).get(key)

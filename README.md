@@ -130,10 +130,11 @@ BotMother always injects `BOT_TOKEN`, `BOT_DB_PATH`, `PATH`, `PYTHONUNBUFFERED`,
 
 ## Localization
 
-Manager UI text is loaded from JSON locale files under `botmother/locales/`. English is the only included locale for now:
+Manager UI text is loaded from JSON locale files under `botmother/locales/`. English and Myanmar are included:
 
 ```text
 botmother/locales/en.json
+botmother/locales/my.json
 ```
 
 Generated bots default to English unless the user explicitly asks for another language or multilingual support. BotMother no longer asks a separate localization question before planning.

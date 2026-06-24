@@ -7,7 +7,7 @@ from typing import Any
 
 from .ai import MAX_FOLLOWUP_ROUNDS, AIDecision, AIReadinessDecision
 from .db import Database
-from .localization import t
+from .localization import normalize_locale, t
 from .service import BotService, OperationResult
 
 logger = logging.getLogger(__name__)
@@ -128,10 +128,10 @@ def bot_title(row: Any) -> str:
     return str(row["name"])
 
 
-def format_bot_list(rows: list[Any]) -> str:
+def format_bot_list(rows: list[Any], locale: str = "en") -> str:
     if not rows:
-        return t("empty.bots")
-    lines = [t("bots.title")]
+        return t("empty.bots", locale=locale)
+    lines = [t("bots.title", locale=locale)]
     for row in rows:
         line = f"{escape(status_badge(row['status']))}  <b>{escape(bot_title(row))}</b>"
         username = bot_username_label(row)
@@ -149,9 +149,9 @@ def format_bot_status(row: Any) -> str:
     )
 
 
-def format_logs(rows: list[Any]) -> str:
+def format_logs(rows: list[Any], locale: str = "en") -> str:
     if not rows:
-        return t("logs.empty")
+        return t("logs.empty", locale=locale)
     lines = []
     for row in rows:
         line = str(row["line"]).replace("\n", " ")
@@ -169,8 +169,10 @@ def compact_bot_label(row: Any) -> str:
     return f"{STATUS_EMOJI.get(row['status'], '•')} {name}"
 
 
-def help_category_text(category: str) -> str:
-    return HELP_CATEGORY_TEXTS.get(category, HELP_TEXT)
+def help_category_text(category: str, locale: str = "en") -> str:
+    if category in {"create", "manage", "ops", "utils", "fallback"}:
+        return t(f"help.{category}", locale=locale)
+    return t("help.text", locale=locale)
 
 
 def format_result_html(text: str) -> str:
@@ -204,6 +206,8 @@ def question_texts(decision: AIDecision | AIReadinessDecision) -> list[str]:
 
 
 def format_ai_questions(decision: AIDecision | AIReadinessDecision) -> str:
+    if decision.needs_questions and not decision.questions:
+        return "I need a little more detail before building."
     if decision.message.strip():
         return decision.message.strip()
     if decision.questions:
@@ -224,6 +228,19 @@ def _remember_user(db: Database, update: Any) -> int:
     user_id, username, first_name, last_name = _user_tuple(update)
     db.upsert_user(user_id, username, first_name, last_name)
     return user_id
+
+
+def locale_for_update(update: Any) -> str:
+    user = getattr(update, "effective_user", None)
+    return normalize_locale(getattr(user, "language_code", None))
+
+
+def tr(update: Any, key: str, **values: Any) -> str:
+    return t(key, locale=locale_for_update(update), **values)
+
+
+def bot_not_found_text(update: Any) -> str:
+    return tr(update, "bot_not_found")
 
 
 def user_context_for_ai(update: Any) -> str:
@@ -324,183 +341,185 @@ def build_application(token: str, db: Database, service: BotService):
     def keyboard_for_user(user_id: int):
         return remove_keyboard
 
-    flow_keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("❌ Cancel", callback_data="nav:cancel")]]
-    )
+    def flow_keyboard(locale: str = "en"):
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton(t("button.cancel", locale=locale), callback_data="nav:cancel")]]
+        )
+
     home_keyboard = remove_keyboard
 
-    def home_menu_keyboard():
+    def home_menu_keyboard(locale: str = "en"):
         return InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("🪄 New Bot", callback_data="nav:newbot"),
-                    InlineKeyboardButton("📦 My Bots", callback_data="nav:bots"),
+                    InlineKeyboardButton(t("button.new_bot", locale=locale), callback_data="nav:newbot"),
+                    InlineKeyboardButton(t("button.my_bots", locale=locale), callback_data="nav:bots"),
                 ],
                 [
-                    InlineKeyboardButton("✨ Examples", callback_data="nav:examples"),
-                    InlineKeyboardButton("📚 Help", callback_data="nav:help"),
+                    InlineKeyboardButton(t("button.examples", locale=locale), callback_data="nav:examples"),
+                    InlineKeyboardButton(t("button.help", locale=locale), callback_data="nav:help"),
                 ],
                 [
-                    InlineKeyboardButton("🪪 Profile", callback_data="nav:id"),
-                    InlineKeyboardButton("🩺 Health", callback_data="nav:health"),
+                    InlineKeyboardButton(t("button.profile", locale=locale), callback_data="nav:id"),
+                    InlineKeyboardButton(t("button.health", locale=locale), callback_data="nav:health"),
                 ],
             ]
         )
 
-    def help_menu_keyboard():
+    def help_menu_keyboard(locale: str = "en"):
         return InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("🪄 New Bot", callback_data="nav:newbot"),
-                    InlineKeyboardButton("📦 My Bots", callback_data="nav:bots"),
+                    InlineKeyboardButton(t("button.new_bot", locale=locale), callback_data="nav:newbot"),
+                    InlineKeyboardButton(t("button.my_bots", locale=locale), callback_data="nav:bots"),
                 ],
                 [
-                    InlineKeyboardButton("🪄 Create", callback_data="help:create"),
-                    InlineKeyboardButton("📦 Manage", callback_data="help:manage"),
+                    InlineKeyboardButton(t("button.create", locale=locale), callback_data="help:create"),
+                    InlineKeyboardButton(t("button.manage", locale=locale), callback_data="help:manage"),
                 ],
                 [
-                    InlineKeyboardButton("🧰 Operations", callback_data="help:ops"),
-                    InlineKeyboardButton("🪪 Utilities", callback_data="help:utils"),
+                    InlineKeyboardButton(t("button.operations", locale=locale), callback_data="help:ops"),
+                    InlineKeyboardButton(t("button.utilities", locale=locale), callback_data="help:utils"),
                 ],
                 [
                     InlineKeyboardButton(
-                        "⌨️ Command Fallbacks", callback_data="help:fallback"
+                        t("button.command_fallbacks", locale=locale), callback_data="help:fallback"
                     )
                 ],
-                [InlineKeyboardButton("🏠 Home", callback_data="nav:home")],
+                [InlineKeyboardButton(t("button.home", locale=locale), callback_data="nav:home")],
             ]
         )
 
-    def help_category_keyboard(category: str):
+    def help_category_keyboard(category: str, locale: str = "en"):
         if category == "create":
             rows = [
                 [
-                    InlineKeyboardButton("🪄 New Bot", callback_data="nav:newbot"),
-                    InlineKeyboardButton("✨ Examples", callback_data="nav:examples"),
+                    InlineKeyboardButton(t("button.new_bot", locale=locale), callback_data="nav:newbot"),
+                    InlineKeyboardButton(t("button.examples", locale=locale), callback_data="nav:examples"),
                 ],
-                [InlineKeyboardButton("📚 Help", callback_data="nav:help")],
+                [InlineKeyboardButton(t("button.help", locale=locale), callback_data="nav:help")],
             ]
         elif category == "manage":
             rows = [
                 [
-                    InlineKeyboardButton("📦 My Bots", callback_data="nav:bots"),
-                    InlineKeyboardButton("📊 Status", callback_data="pick:status"),
+                    InlineKeyboardButton(t("button.my_bots", locale=locale), callback_data="nav:bots"),
+                    InlineKeyboardButton(t("button.status", locale=locale), callback_data="pick:status"),
                 ],
                 [
-                    InlineKeyboardButton("💬 Ask Bot", callback_data="pick:ask"),
-                    InlineKeyboardButton("✏️ Edit Bot", callback_data="pick:edit"),
+                    InlineKeyboardButton(t("button.ask_bot", locale=locale), callback_data="pick:ask"),
+                    InlineKeyboardButton(t("button.edit_bot", locale=locale), callback_data="pick:edit"),
                 ],
-                [InlineKeyboardButton("♻️ Revise", callback_data="pick:revise")],
-                [InlineKeyboardButton("📚 Help", callback_data="nav:help")],
+                [InlineKeyboardButton(t("button.revise", locale=locale), callback_data="pick:revise")],
+                [InlineKeyboardButton(t("button.help", locale=locale), callback_data="nav:help")],
             ]
         elif category == "ops":
             rows = [
                 [
-                    InlineKeyboardButton("🧾 Logs", callback_data="pick:tail"),
-                    InlineKeyboardButton("🔄 Restart", callback_data="pick:restart"),
+                    InlineKeyboardButton(t("button.logs", locale=locale), callback_data="pick:tail"),
+                    InlineKeyboardButton(t("button.restart", locale=locale), callback_data="pick:restart"),
                 ],
                 [
-                    InlineKeyboardButton("🛑 Stop", callback_data="pick:stop"),
+                    InlineKeyboardButton(t("button.stop", locale=locale), callback_data="pick:stop"),
                     InlineKeyboardButton(
-                        "🗑️ Delete", callback_data="pick:delete_confirm"
+                        t("button.delete", locale=locale), callback_data="pick:delete_confirm"
                     ),
                 ],
-                [InlineKeyboardButton("📚 Help", callback_data="nav:help")],
+                [InlineKeyboardButton(t("button.help", locale=locale), callback_data="nav:help")],
             ]
         elif category == "utils":
             rows = [
                 [
-                    InlineKeyboardButton("🪪 Profile", callback_data="nav:id"),
-                    InlineKeyboardButton("🩺 Health", callback_data="nav:health"),
+                    InlineKeyboardButton(t("button.profile", locale=locale), callback_data="nav:id"),
+                    InlineKeyboardButton(t("button.health", locale=locale), callback_data="nav:health"),
                 ],
-                [InlineKeyboardButton("✨ Examples", callback_data="nav:examples")],
-                [InlineKeyboardButton("📚 Help", callback_data="nav:help")],
+                [InlineKeyboardButton(t("button.examples", locale=locale), callback_data="nav:examples")],
+                [InlineKeyboardButton(t("button.help", locale=locale), callback_data="nav:help")],
             ]
         elif category == "fallback":
             rows = [
                 [
-                    InlineKeyboardButton("🪄 New Bot", callback_data="nav:newbot"),
-                    InlineKeyboardButton("📦 My Bots", callback_data="nav:bots"),
+                    InlineKeyboardButton(t("button.new_bot", locale=locale), callback_data="nav:newbot"),
+                    InlineKeyboardButton(t("button.my_bots", locale=locale), callback_data="nav:bots"),
                 ],
                 [
-                    InlineKeyboardButton("📊 Status", callback_data="pick:status"),
-                    InlineKeyboardButton("🧾 Logs", callback_data="pick:tail"),
+                    InlineKeyboardButton(t("button.status", locale=locale), callback_data="pick:status"),
+                    InlineKeyboardButton(t("button.logs", locale=locale), callback_data="pick:tail"),
                 ],
                 [
-                    InlineKeyboardButton("💬 Ask Bot", callback_data="pick:ask"),
-                    InlineKeyboardButton("✏️ Edit Bot", callback_data="pick:edit"),
+                    InlineKeyboardButton(t("button.ask_bot", locale=locale), callback_data="pick:ask"),
+                    InlineKeyboardButton(t("button.edit_bot", locale=locale), callback_data="pick:edit"),
                 ],
                 [
-                    InlineKeyboardButton("♻️ Revise", callback_data="pick:revise"),
-                    InlineKeyboardButton("🔄 Restart", callback_data="pick:restart"),
+                    InlineKeyboardButton(t("button.revise", locale=locale), callback_data="pick:revise"),
+                    InlineKeyboardButton(t("button.restart", locale=locale), callback_data="pick:restart"),
                 ],
                 [
-                    InlineKeyboardButton("🛑 Stop", callback_data="pick:stop"),
+                    InlineKeyboardButton(t("button.stop", locale=locale), callback_data="pick:stop"),
                     InlineKeyboardButton(
-                        "🗑️ Delete", callback_data="pick:delete_confirm"
+                        t("button.delete", locale=locale), callback_data="pick:delete_confirm"
                     ),
                 ],
                 [
-                    InlineKeyboardButton("🪪 Profile", callback_data="nav:id"),
-                    InlineKeyboardButton("🩺 Health", callback_data="nav:health"),
+                    InlineKeyboardButton(t("button.profile", locale=locale), callback_data="nav:id"),
+                    InlineKeyboardButton(t("button.health", locale=locale), callback_data="nav:health"),
                 ],
                 [
-                    InlineKeyboardButton("✨ Examples", callback_data="nav:examples"),
-                    InlineKeyboardButton("❌ Cancel", callback_data="nav:cancel"),
+                    InlineKeyboardButton(t("button.examples", locale=locale), callback_data="nav:examples"),
+                    InlineKeyboardButton(t("button.cancel", locale=locale), callback_data="nav:cancel"),
                 ],
-                [InlineKeyboardButton("📚 Help", callback_data="nav:help")],
+                [InlineKeyboardButton(t("button.help", locale=locale), callback_data="nav:help")],
             ]
         else:
             rows = [
                 [
-                    InlineKeyboardButton("🪄 New Bot", callback_data="nav:newbot"),
-                    InlineKeyboardButton("📦 My Bots", callback_data="nav:bots"),
+                    InlineKeyboardButton(t("button.new_bot", locale=locale), callback_data="nav:newbot"),
+                    InlineKeyboardButton(t("button.my_bots", locale=locale), callback_data="nav:bots"),
                 ],
-                [InlineKeyboardButton("📚 Help", callback_data="nav:help")],
+                [InlineKeyboardButton(t("button.help", locale=locale), callback_data="nav:help")],
             ]
         return InlineKeyboardMarkup(rows)
 
-    def empty_state_keyboard():
+    def empty_state_keyboard(locale: str = "en"):
         return InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("🪄 New Bot", callback_data="nav:newbot")],
+                [InlineKeyboardButton(t("button.new_bot", locale=locale), callback_data="nav:newbot")],
                 [
-                    InlineKeyboardButton("✨ Examples", callback_data="nav:examples"),
-                    InlineKeyboardButton("📚 Help", callback_data="nav:help"),
+                    InlineKeyboardButton(t("button.examples", locale=locale), callback_data="nav:examples"),
+                    InlineKeyboardButton(t("button.help", locale=locale), callback_data="nav:help"),
                 ],
             ]
         )
 
-    def bot_actions_keyboard(bot_id: int):
+    def bot_actions_keyboard(bot_id: int, locale: str = "en"):
         return InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("📊 Status", callback_data=f"status:{bot_id}"),
-                    InlineKeyboardButton("🧾 Logs", callback_data=f"tail:{bot_id}"),
+                    InlineKeyboardButton(t("button.status", locale=locale), callback_data=f"status:{bot_id}"),
+                    InlineKeyboardButton(t("button.logs", locale=locale), callback_data=f"tail:{bot_id}"),
                 ],
                 [
-                    InlineKeyboardButton("💬 Ask", callback_data=f"ask:{bot_id}"),
-                    InlineKeyboardButton("✏️ Edit", callback_data=f"edit:{bot_id}"),
+                    InlineKeyboardButton(t("button.ask", locale=locale), callback_data=f"ask:{bot_id}"),
+                    InlineKeyboardButton(t("button.edit", locale=locale), callback_data=f"edit:{bot_id}"),
                 ],
-                [InlineKeyboardButton("♻️ Revise", callback_data=f"revise:{bot_id}")],
+                [InlineKeyboardButton(t("button.revise", locale=locale), callback_data=f"revise:{bot_id}")],
                 [
                     InlineKeyboardButton(
-                        "🔄 Restart", callback_data=f"restart:{bot_id}"
+                        t("button.restart", locale=locale), callback_data=f"restart:{bot_id}"
                     ),
-                    InlineKeyboardButton("🛑 Stop", callback_data=f"stop:{bot_id}"),
+                    InlineKeyboardButton(t("button.stop", locale=locale), callback_data=f"stop:{bot_id}"),
                 ],
                 [
                     InlineKeyboardButton(
-                        "🗑️ Delete", callback_data=f"delete_confirm:{bot_id}"
+                        t("button.delete", locale=locale), callback_data=f"delete_confirm:{bot_id}"
                     )
                 ],
-                [InlineKeyboardButton("⬅️ Back", callback_data="nav:bots")],
+                [InlineKeyboardButton(t("button.my_bots", locale=locale), callback_data="nav:bots")],
             ]
         )
 
-    def bots_keyboard(rows: list[Any], action: str = "status", show_back: bool = False):
+    def bots_keyboard(rows: list[Any], action: str = "status", show_back: bool = False, locale: str = "en"):
         if not rows:
-            return empty_state_keyboard()
+            return empty_state_keyboard(locale)
         buttons = [
             [
                 InlineKeyboardButton(
@@ -510,7 +529,7 @@ def build_application(token: str, db: Database, service: BotService):
             for row in rows[:20]
         ]
         if show_back:
-            buttons.append([InlineKeyboardButton("📦 My Bots", callback_data="nav:bots")])
+            buttons.append([InlineKeyboardButton(t("button.my_bots", locale=locale), callback_data="nav:bots")])
         return InlineKeyboardMarkup(buttons)
 
     def is_message_not_modified(exc: Exception) -> bool:
@@ -605,7 +624,7 @@ def build_application(token: str, db: Database, service: BotService):
         context.user_data.clear()
         await reply_html(
             update.effective_message,
-            t("flow.expired"),
+            tr(update, "flow.expired"),
             reply_markup=keyboard_for_user(_remember_user(db, update)),
         )
         await choose_bot_for_action(update, action, title)
@@ -613,22 +632,24 @@ def build_application(token: str, db: Database, service: BotService):
 
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
+        locale = locale_for_update(update)
         logger.info("Command /start: user_id=%s chat_id=%s", user_id, _chat_id(update))
-        await reply_home(update.effective_message, HELP_TEXT)
+        await reply_home(update.effective_message, t("help.text", locale=locale))
         await reply_html(
             update.effective_message,
-            "<b>🏠 Home</b>\n\nChoose what you want to do:",
-            reply_markup=home_menu_keyboard(),
+            t("home.title", locale=locale),
+            reply_markup=home_menu_keyboard(locale),
         )
 
     async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
+        locale = locale_for_update(update)
         logger.info("Command /help: user_id=%s chat_id=%s", user_id, _chat_id(update))
-        await reply_home(update.effective_message, HELP_TEXT)
+        await reply_home(update.effective_message, t("help.text", locale=locale))
         await reply_html(
             update.effective_message,
-            t("help.menu_title"),
-            reply_markup=help_menu_keyboard(),
+            t("help.menu_title", locale=locale),
+            reply_markup=help_menu_keyboard(locale),
         )
 
     async def examples(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -638,7 +659,7 @@ def build_application(token: str, db: Database, service: BotService):
         )
         await reply_html(
             update.effective_message,
-            EXAMPLES_TEXT,
+            tr(update, "examples.text"),
             reply_markup=keyboard_for_user(user_id),
         )
 
@@ -654,6 +675,7 @@ def build_application(token: str, db: Database, service: BotService):
 
     async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
+        locale = locale_for_update(update)
         rows = service.list_bots_for(user_id)
         active_count = len(service.runner.active)
         running_visible = sum(1 for row in rows if row["status"] == "running")
@@ -666,7 +688,7 @@ def build_application(token: str, db: Database, service: BotService):
         scope = "all bots" if service.is_owner(user_id) else "your bots"
         await reply_html(
             update.effective_message,
-            t("health.title")
+            t("health.title", locale=locale)
             + "\n\n"
             f"<b>Manager</b>\nonline\n\n"
             f"<b>Scope</b>\n{escape(scope)}\n\n"
@@ -682,8 +704,8 @@ def build_application(token: str, db: Database, service: BotService):
         context.user_data.clear()
         await edit_or_reply_html(
             update,
-            t("cancel.done"),
-            reply_markup=home_menu_keyboard()
+            tr(update, "cancel.done"),
+            reply_markup=home_menu_keyboard(locale_for_update(update))
             if update.callback_query is not None
             else keyboard_for_user(user_id),
         )
@@ -696,9 +718,9 @@ def build_application(token: str, db: Database, service: BotService):
         context.user_data["newbot_user_context"] = user_context_for_ai(update)
         await reply_html(
             update.effective_message,
-            t("newbot.start"),
+            tr(update, "newbot.start"),
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("✨ Examples", callback_data="nav:examples")]]
+                [[InlineKeyboardButton(tr(update, "button.examples"), callback_data="nav:examples")]]
             ),
         )
         return NEW_PROMPT
@@ -709,8 +731,8 @@ def build_application(token: str, db: Database, service: BotService):
         if not prompt:
             await reply_html(
                 update.effective_message,
-                t("newbot.empty_prompt"),
-                reply_markup=flow_keyboard,
+                tr(update, "newbot.empty_prompt"),
+                reply_markup=flow_keyboard(locale_for_update(update)),
             )
             return NEW_PROMPT
         logger.info("Received newbot prompt: user_id=%s chars=%s", user_id, len(prompt))
@@ -727,7 +749,7 @@ def build_application(token: str, db: Database, service: BotService):
         answers = context.user_data.get("newbot_answers", [])
         force_code = len(answers) >= MAX_FOLLOWUP_ROUNDS
         progress_message = await reply_html(
-            update.effective_message, t("newbot.thinking")
+            update.effective_message, tr(update, "newbot.thinking")
         )
         decision = service.plan_new_bot(
             prompt,
@@ -739,7 +761,7 @@ def build_application(token: str, db: Database, service: BotService):
             if force_code:
                 await edit_message_html(
                     progress_message,
-                    t("newbot.more_detail"),
+                    tr(update, "newbot.more_detail"),
                 )
                 context.user_data.clear()
                 return ConversationHandler.END
@@ -757,7 +779,7 @@ def build_application(token: str, db: Database, service: BotService):
             if force_code:
                 await edit_message_html(
                     progress_message,
-                    t("newbot.missing_launch_detail"),
+                    tr(update, "newbot.missing_launch_detail"),
                 )
                 context.user_data.clear()
                 return ConversationHandler.END
@@ -769,7 +791,7 @@ def build_application(token: str, db: Database, service: BotService):
         await edit_message_html(
             progress_message,
             (escape(decision.message.strip()) + "\n\n" if decision.message else "")
-            + t("newbot.token"),
+            + tr(update, "newbot.token"),
         )
         return NEW_TOKEN
 
@@ -781,8 +803,8 @@ def build_application(token: str, db: Database, service: BotService):
         if not answer:
             await reply_html(
                 update.effective_message,
-                t("followup.empty"),
-                reply_markup=flow_keyboard,
+                tr(update, "followup.empty"),
+                reply_markup=flow_keyboard(locale_for_update(update)),
             )
             return NEW_FOLLOWUP
         answers = context.user_data.setdefault("newbot_answers", [])
@@ -808,14 +830,14 @@ def build_application(token: str, db: Database, service: BotService):
         if not isinstance(decision, AIDecision):
             await reply_html(
                 update.effective_message,
-                t("newbot.expired"),
+                tr(update, "newbot.expired"),
                 reply_markup=keyboard_for_user(user_id),
             )
             context.user_data.clear()
             return ConversationHandler.END
         progress_message = await reply_html(
             update.effective_message,
-            t("newbot.launching"),
+            tr(update, "newbot.launching"),
         )
         result = await service.create_bot_from_decision(
             user_id,
@@ -831,7 +853,11 @@ def build_application(token: str, db: Database, service: BotService):
             result.ok,
             result.bot_id,
         )
-        result_markup = bot_actions_keyboard(result.bot_id) if result.bot_id else None
+        result_markup = (
+            bot_actions_keyboard(result.bot_id, locale_for_update(update))
+            if result.bot_id
+            else None
+        )
         await edit_message_result(
             progress_message,
             result.message,
@@ -847,8 +873,8 @@ def build_application(token: str, db: Database, service: BotService):
         logger.info("Command /bots: user_id=%s count=%s", user_id, len(rows))
         await reply_html(
             update.effective_message,
-            format_bot_list(rows),
-            reply_markup=bots_keyboard(rows),
+            format_bot_list(rows, locale_for_update(update)),
+            reply_markup=bots_keyboard(rows, locale=locale_for_update(update)),
         )
 
     async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -860,18 +886,18 @@ def build_application(token: str, db: Database, service: BotService):
             rows = service.list_bots_for(user_id)
             await reply_html(
                 update.effective_message,
-                format_bot_list(rows),
-                reply_markup=bots_keyboard(rows),
+                format_bot_list(rows, locale_for_update(update)),
+                reply_markup=bots_keyboard(rows, locale=locale_for_update(update)),
             )
             return
         row = service.get_accessible_bot(user_id, bot_id)
         if row is None:
-            await reply_html(update.effective_message, BOT_NOT_FOUND_TEXT)
+            await reply_html(update.effective_message, bot_not_found_text(update))
             return
         await reply_html(
             update.effective_message,
             format_bot_status(row),
-            reply_markup=bot_actions_keyboard(bot_id),
+            reply_markup=bot_actions_keyboard(bot_id, locale_for_update(update)),
         )
 
     async def tail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -882,7 +908,7 @@ def build_application(token: str, db: Database, service: BotService):
             else "/tail"
         )
         if not context.args:
-            await choose_bot_for_action(update, "tail", t("choose.tail"))
+            await choose_bot_for_action(update, "tail", tr(update, "choose.tail"))
             return
         bot_id, limit, error = parse_tail_args(context.args)
         logger.info(
@@ -893,10 +919,10 @@ def build_application(token: str, db: Database, service: BotService):
             return
         row = service.get_accessible_bot(user_id, bot_id)
         if row is None:
-            await reply_html(update.effective_message, BOT_NOT_FOUND_TEXT)
+            await reply_html(update.effective_message, bot_not_found_text(update))
             return
         await update.effective_message.reply_text(
-            f"<pre>{escape(format_logs(db.get_logs(bot_id, limit)))}</pre>",
+            f"<pre>{escape(format_logs(db.get_logs(bot_id, limit), locale_for_update(update)))}</pre>",
             parse_mode=ParseMode.HTML,
             reply_markup=keyboard_for_user(user_id),
         )
@@ -904,7 +930,7 @@ def build_application(token: str, db: Database, service: BotService):
     async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         user_id = _remember_user(db, update)
         if not context.args:
-            await choose_bot_for_action(update, "ask", t("choose.ask"))
+            await choose_bot_for_action(update, "ask", tr(update, "choose.ask"))
             return ConversationHandler.END
         bot_id, question, error = parse_ask_args(context.args)
         logger.info(
@@ -917,11 +943,11 @@ def build_application(token: str, db: Database, service: BotService):
             await reply_html(update.effective_message, error)
             return ConversationHandler.END
         if not service.can_manage(user_id, bot_id):
-            await reply_html(update.effective_message, BOT_NOT_FOUND_TEXT)
+            await reply_html(update.effective_message, bot_not_found_text(update))
             return ConversationHandler.END
         row = service.get_accessible_bot(user_id, bot_id)
         if row is None:
-            await reply_html(update.effective_message, BOT_NOT_FOUND_TEXT)
+            await reply_html(update.effective_message, bot_not_found_text(update))
             return ConversationHandler.END
         title = escape(bot_title(row))
         if question:
@@ -930,22 +956,22 @@ def build_application(token: str, db: Database, service: BotService):
         context.user_data["ask_user_context"] = user_context_for_ai(update)
         await reply_html(
             update.effective_message,
-            t("ask.start_examples", title=title),
-            reply_markup=flow_keyboard,
+            tr(update, "ask.start_examples", title=title),
+            reply_markup=flow_keyboard(locale_for_update(update)),
         )
         return ASK_PROMPT
 
     async def ask_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         user_id = _remember_user(db, update)
         if "ask_bot_id" not in context.user_data:
-            return await restart_expired_flow(update, context, "ask", t("choose.ask"))
+            return await restart_expired_flow(update, context, "ask", tr(update, "choose.ask"))
         bot_id = int(context.user_data["ask_bot_id"])
         question = (update.effective_message.text or "").strip()
         if not question:
             await reply_html(
                 update.effective_message,
-                t("ask.empty"),
-                reply_markup=flow_keyboard,
+                tr(update, "ask.empty"),
+                reply_markup=flow_keyboard(locale_for_update(update)),
             )
             return ASK_PROMPT
         return await answer_bot_question(update, context, user_id, bot_id, question)
@@ -959,7 +985,7 @@ def build_application(token: str, db: Database, service: BotService):
     ) -> int:
         progress_message = await reply_html(
             update.effective_message,
-            t("ask.reading"),
+            tr(update, "ask.reading"),
         )
         result = service.ask_bot(user_id, bot_id, question)
         logger.info(
@@ -987,20 +1013,22 @@ def build_application(token: str, db: Database, service: BotService):
             len(rows),
         )
         if not rows:
-            message = t("choose.none")
+            message = tr(update, "choose.none")
             if edit:
                 await edit_or_reply_html(
-                    update, message, reply_markup=empty_state_keyboard()
+                    update, message, reply_markup=empty_state_keyboard(locale_for_update(update))
                 )
             else:
                 await reply_html(
                     update.effective_message,
                     message,
-                    reply_markup=empty_state_keyboard(),
+                    reply_markup=empty_state_keyboard(locale_for_update(update)),
                 )
             return
         message = f"<b>{escape(title)}</b>"
-        reply_markup = bots_keyboard(rows, action, show_back=False)
+        reply_markup = bots_keyboard(
+            rows, action, show_back=False, locale=locale_for_update(update)
+        )
         if edit:
             await edit_or_reply_html(update, message, reply_markup=reply_markup)
         else:
@@ -1011,21 +1039,21 @@ def build_application(token: str, db: Database, service: BotService):
         if text == "📦 My Bots":
             await bots(update, context)
         elif text == "📊 Status":
-            await choose_bot_for_action(update, "status", t("choose.status"))
+            await choose_bot_for_action(update, "status", tr(update, "choose.status"))
         elif text == "💬 Ask Bot":
-            await choose_bot_for_action(update, "ask", t("choose.ask"))
+            await choose_bot_for_action(update, "ask", tr(update, "choose.ask"))
         elif text == "✏️ Edit Bot":
-            await choose_bot_for_action(update, "edit", t("choose.edit"))
+            await choose_bot_for_action(update, "edit", tr(update, "choose.edit"))
         elif text == "♻️ Revise":
-            await choose_bot_for_action(update, "revise", t("choose.revise"))
+            await choose_bot_for_action(update, "revise", tr(update, "choose.revise"))
         elif text == "🧾 Logs":
-            await choose_bot_for_action(update, "tail", t("choose.tail"))
+            await choose_bot_for_action(update, "tail", tr(update, "choose.tail"))
         elif text == "🔄 Restart":
-            await choose_bot_for_action(update, "restart", t("choose.restart"))
+            await choose_bot_for_action(update, "restart", tr(update, "choose.restart"))
         elif text == "🛑 Stop":
-            await choose_bot_for_action(update, "stop", t("choose.stop"))
+            await choose_bot_for_action(update, "stop", tr(update, "choose.stop"))
         elif text == "🗑️ Delete":
-            await choose_bot_for_action(update, "delete_confirm", t("choose.delete"))
+            await choose_bot_for_action(update, "delete_confirm", tr(update, "choose.delete"))
         elif text == "🪪 Profile":
             await identity(update, context)
         elif text == "🩺 Health":
@@ -1046,9 +1074,9 @@ def build_application(token: str, db: Database, service: BotService):
         context.user_data["newbot_user_context"] = user_context_for_ai(update)
         await edit_or_reply_html(
             update,
-            t("newbot.start"),
+            tr(update, "newbot.start"),
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("✨ Examples", callback_data="nav:examples")]]
+                [[InlineKeyboardButton(tr(update, "button.examples"), callback_data="nav:examples")]]
             ),
         )
         return NEW_PROMPT
@@ -1061,13 +1089,13 @@ def build_application(token: str, db: Database, service: BotService):
         bot_id = int((query.data if query else "").split(":", 1)[1])
         row = service.get_accessible_bot(user_id, bot_id)
         if row is None:
-            await edit_or_reply_html(update, BOT_NOT_FOUND_TEXT)
+            await edit_or_reply_html(update, bot_not_found_text(update))
             return ConversationHandler.END
         context.user_data["ask_bot_id"] = bot_id
         context.user_data["ask_user_context"] = user_context_for_ai(update)
         await edit_or_reply_html(
             update,
-            t("ask.start_short", title=escape(bot_title(row))),
+            tr(update, "ask.start_short", title=escape(bot_title(row))),
         )
         return ASK_PROMPT
 
@@ -1079,13 +1107,13 @@ def build_application(token: str, db: Database, service: BotService):
         bot_id = int((query.data if query else "").split(":", 1)[1])
         row = service.get_accessible_bot(user_id, bot_id)
         if row is None:
-            await edit_or_reply_html(update, BOT_NOT_FOUND_TEXT)
+            await edit_or_reply_html(update, bot_not_found_text(update))
             return ConversationHandler.END
         context.user_data["edit_bot_id"] = bot_id
         context.user_data["edit_user_context"] = user_context_for_ai(update)
         await edit_or_reply_html(
             update,
-            t("edit.start_short", title=escape(bot_title(row))),
+            tr(update, "edit.start_short", title=escape(bot_title(row))),
         )
         return EDIT_PROMPT
 
@@ -1097,13 +1125,13 @@ def build_application(token: str, db: Database, service: BotService):
         bot_id = int((query.data if query else "").split(":", 1)[1])
         row = service.get_accessible_bot(user_id, bot_id)
         if row is None:
-            await edit_or_reply_html(update, BOT_NOT_FOUND_TEXT)
+            await edit_or_reply_html(update, bot_not_found_text(update))
             return ConversationHandler.END
         context.user_data["revise_bot_id"] = bot_id
         context.user_data["revise_user_context"] = user_context_for_ai(update)
         await edit_or_reply_html(
             update,
-            t("revise.start_short", title=escape(bot_title(row))),
+            tr(update, "revise.start_short", title=escape(bot_title(row))),
         )
         return REVISE_PROMPT
 
@@ -1121,42 +1149,42 @@ def build_application(token: str, db: Database, service: BotService):
         if data == "nav:home":
             await edit_or_reply_html(
                 update,
-                "<b>🏠 Home</b>\n\nChoose what you want to do:",
-                reply_markup=home_menu_keyboard(),
+                tr(update, "home.title"),
+                reply_markup=home_menu_keyboard(locale_for_update(update)),
             )
             return
         if data == "nav:help":
             await edit_or_reply_html(
                 update,
-                t("help.menu_title"),
-                reply_markup=help_menu_keyboard(),
+                tr(update, "help.menu_title"),
+                reply_markup=help_menu_keyboard(locale_for_update(update)),
             )
             return
         if data == "nav:examples":
-            await edit_or_reply_html(update, EXAMPLES_TEXT)
+            await edit_or_reply_html(update, tr(update, "examples.text"))
             return
         if data == "nav:bots":
             await service.refresh_missing_bot_usernames_for(user_id)
             rows = service.list_bots_for(user_id)
             await edit_or_reply_html(
                 update,
-                format_bot_list(rows),
-                reply_markup=bots_keyboard(rows),
+                format_bot_list(rows, locale_for_update(update)),
+                reply_markup=bots_keyboard(rows, locale=locale_for_update(update)),
             )
             return
         if data == "nav:id":
             await edit_or_reply_html(
                 update,
                 format_user_profile(update, service.is_owner(user_id)),
-                reply_markup=home_menu_keyboard(),
+                reply_markup=home_menu_keyboard(locale_for_update(update)),
             )
             return
         if data == "nav:cancel":
             context.user_data.clear()
             await edit_or_reply_html(
                 update,
-                t("cancel.done"),
-                reply_markup=home_menu_keyboard(),
+                tr(update, "cancel.done"),
+                reply_markup=home_menu_keyboard(locale_for_update(update)),
             )
             return
         if data == "nav:health":
@@ -1165,33 +1193,33 @@ def build_application(token: str, db: Database, service: BotService):
             running_visible = sum(1 for row in rows if row["status"] == "running")
             await edit_or_reply_html(
                 update,
-                t("health.title")
+                tr(update, "health.title")
                 + "\n\n"
                 f"<b>Visible bots</b>\n<code>{len(rows)}</code>\n\n"
                 f"<b>Running in DB</b>\n<code>{running_visible}</code>\n\n"
                 f"<b>Active child processes</b>\n<code>{active_count}</code>",
-                reply_markup=home_menu_keyboard(),
+                reply_markup=home_menu_keyboard(locale_for_update(update)),
             )
             return
         if data.startswith("help:"):
             category = data.split(":", 1)[1]
             await edit_or_reply_html(
                 update,
-                help_category_text(category),
-                reply_markup=help_category_keyboard(category),
+                help_category_text(category, locale_for_update(update)),
+                reply_markup=help_category_keyboard(category, locale_for_update(update)),
             )
             return
         if data.startswith("pick:"):
             action = data.split(":", 1)[1]
             titles = {
-                "status": t("choose.status"),
-                "ask": t("choose.ask"),
-                "edit": t("choose.edit"),
-                "revise": t("choose.revise"),
-                "tail": t("choose.tail"),
-                "restart": t("choose.restart"),
-                "stop": t("choose.stop"),
-                "delete_confirm": t("choose.delete"),
+                "status": tr(update, "choose.status"),
+                "ask": tr(update, "choose.ask"),
+                "edit": tr(update, "choose.edit"),
+                "revise": tr(update, "choose.revise"),
+                "tail": tr(update, "choose.tail"),
+                "restart": tr(update, "choose.restart"),
+                "stop": tr(update, "choose.stop"),
+                "delete_confirm": tr(update, "choose.delete"),
             }
             await choose_bot_for_action(
                 update, action, titles.get(action, "Choose a bot:"), edit=True
@@ -1207,7 +1235,7 @@ def build_application(token: str, db: Database, service: BotService):
             return
 
         if not service.can_manage(user_id, bot_id):
-            await edit_or_reply_html(update, BOT_NOT_FOUND_TEXT)
+            await edit_or_reply_html(update, bot_not_found_text(update))
             return
 
         if action == "status":
@@ -1215,12 +1243,12 @@ def build_application(token: str, db: Database, service: BotService):
             await edit_or_reply_html(
                 update,
                 format_bot_status(row),
-                reply_markup=bot_actions_keyboard(bot_id),
+                reply_markup=bot_actions_keyboard(bot_id, locale_for_update(update)),
             )
         elif action == "tail":
             await edit_or_reply_html(
                 update,
-                f"<pre>{escape(format_logs(db.get_logs(bot_id, 50)))}</pre>",
+                f"<pre>{escape(format_logs(db.get_logs(bot_id, 50), locale_for_update(update)))}</pre>",
             )
         elif action == "restart":
             result = await service.restart_bot(user_id, bot_id)
@@ -1233,15 +1261,15 @@ def build_application(token: str, db: Database, service: BotService):
             title = escape(bot_title(row)) if row is not None else "this bot"
             await edit_or_reply_html(
                 update,
-                t("delete.confirm", title=title),
+                tr(update, "delete.confirm", title=title),
                 reply_markup=InlineKeyboardMarkup(
                     [
                         [
                             InlineKeyboardButton(
-                                "Yes, delete", callback_data=f"delete:{bot_id}"
+                                tr(update, "button.yes_delete"), callback_data=f"delete:{bot_id}"
                             ),
                             InlineKeyboardButton(
-                                "⬅️ Back", callback_data=f"status:{bot_id}"
+                                tr(update, "button.my_bots"), callback_data=f"status:{bot_id}"
                             ),
                         ]
                     ]
@@ -1258,13 +1286,13 @@ def build_application(token: str, db: Database, service: BotService):
         if not service.is_owner(user_id):
             await reply_html(
                 update.effective_message,
-                t("source.owner_only"),
+                tr(update, "source.owner_only"),
             )
             return
         if bot_id is None:
             await reply_html(
                 update.effective_message,
-                t("source.usage"),
+                tr(update, "source.usage"),
             )
             return
         result = service.get_source(user_id, bot_id)
@@ -1291,7 +1319,7 @@ def build_application(token: str, db: Database, service: BotService):
         bot_id = parse_bot_id(context.args)
         logger.info("Command /stop: user_id=%s bot_id=%s", user_id, bot_id)
         if bot_id is None:
-            await choose_bot_for_action(update, "stop", t("choose.stop"))
+            await choose_bot_for_action(update, "stop", tr(update, "choose.stop"))
             return
         result = await service.stop_bot(user_id, bot_id)
         await reply_result(
@@ -1305,7 +1333,7 @@ def build_application(token: str, db: Database, service: BotService):
         bot_id = parse_bot_id(context.args)
         logger.info("Command /restart: user_id=%s bot_id=%s", user_id, bot_id)
         if bot_id is None:
-            await choose_bot_for_action(update, "restart", t("choose.restart"))
+            await choose_bot_for_action(update, "restart", tr(update, "choose.restart"))
             return
         result = await service.restart_bot(user_id, bot_id)
         await reply_result(
@@ -1319,7 +1347,7 @@ def build_application(token: str, db: Database, service: BotService):
         bot_id = parse_bot_id(context.args)
         logger.info("Command /delete: user_id=%s bot_id=%s", user_id, bot_id)
         if bot_id is None:
-            await choose_bot_for_action(update, "delete_confirm", t("choose.delete"))
+            await choose_bot_for_action(update, "delete_confirm", tr(update, "choose.delete"))
             return
         result = await service.delete_bot(user_id, bot_id)
         await reply_result(
@@ -1343,21 +1371,21 @@ def build_application(token: str, db: Database, service: BotService):
         bot_id = parse_bot_id(context.args)
         logger.info("Command /revise: user_id=%s bot_id=%s", user_id, bot_id)
         if bot_id is None:
-            await choose_bot_for_action(update, "revise", t("choose.revise"))
+            await choose_bot_for_action(update, "revise", tr(update, "choose.revise"))
             return ConversationHandler.END
         if not service.can_manage(user_id, bot_id):
-            await reply_html(update.effective_message, BOT_NOT_FOUND_TEXT)
+            await reply_html(update.effective_message, bot_not_found_text(update))
             return ConversationHandler.END
         row = service.get_accessible_bot(user_id, bot_id)
         if row is None:
-            await reply_html(update.effective_message, BOT_NOT_FOUND_TEXT)
+            await reply_html(update.effective_message, bot_not_found_text(update))
             return ConversationHandler.END
         context.user_data["revise_bot_id"] = bot_id
         context.user_data["revise_user_context"] = user_context_for_ai(update)
         await reply_html(
             update.effective_message,
-            t("revise.start", title=escape(bot_title(row))),
-            reply_markup=flow_keyboard,
+            tr(update, "revise.start", title=escape(bot_title(row))),
+            reply_markup=flow_keyboard(locale_for_update(update)),
         )
         return REVISE_PROMPT
 
@@ -1365,15 +1393,15 @@ def build_application(token: str, db: Database, service: BotService):
         user_id = _remember_user(db, update)
         if "revise_bot_id" not in context.user_data:
             return await restart_expired_flow(
-                update, context, "revise", t("choose.revise")
+                update, context, "revise", tr(update, "choose.revise")
             )
         bot_id = int(context.user_data["revise_bot_id"])
         prompt = (update.effective_message.text or "").strip()
         if not prompt:
             await reply_html(
                 update.effective_message,
-                t("revise.empty"),
-                reply_markup=flow_keyboard,
+                tr(update, "revise.empty"),
+                reply_markup=flow_keyboard(locale_for_update(update)),
             )
             return REVISE_PROMPT
         logger.info(
@@ -1384,7 +1412,7 @@ def build_application(token: str, db: Database, service: BotService):
         )
         progress_message = await reply_html(
             update.effective_message,
-            t("revise.running"),
+            tr(update, "revise.running"),
         )
         result = await service.revise_bot(
             user_id,
@@ -1395,7 +1423,11 @@ def build_application(token: str, db: Database, service: BotService):
         logger.info(
             "Revise bot result: user_id=%s bot_id=%s ok=%s", user_id, bot_id, result.ok
         )
-        result_markup = bot_actions_keyboard(result.bot_id) if result.bot_id else None
+        result_markup = (
+            bot_actions_keyboard(result.bot_id, locale_for_update(update))
+            if result.bot_id
+            else None
+        )
         await edit_message_result(
             progress_message,
             result.message,
@@ -1409,21 +1441,21 @@ def build_application(token: str, db: Database, service: BotService):
         bot_id = parse_bot_id(context.args)
         logger.info("Command /edit: user_id=%s bot_id=%s", user_id, bot_id)
         if bot_id is None:
-            await choose_bot_for_action(update, "edit", t("choose.edit"))
+            await choose_bot_for_action(update, "edit", tr(update, "choose.edit"))
             return ConversationHandler.END
         if not service.can_manage(user_id, bot_id):
-            await reply_html(update.effective_message, BOT_NOT_FOUND_TEXT)
+            await reply_html(update.effective_message, bot_not_found_text(update))
             return ConversationHandler.END
         row = service.get_accessible_bot(user_id, bot_id)
         if row is None:
-            await reply_html(update.effective_message, BOT_NOT_FOUND_TEXT)
+            await reply_html(update.effective_message, bot_not_found_text(update))
             return ConversationHandler.END
         context.user_data["edit_bot_id"] = bot_id
         context.user_data["edit_user_context"] = user_context_for_ai(update)
         await reply_html(
             update.effective_message,
-            t("edit.start", title=escape(bot_title(row))),
-            reply_markup=flow_keyboard,
+            tr(update, "edit.start", title=escape(bot_title(row))),
+            reply_markup=flow_keyboard(locale_for_update(update)),
         )
         return EDIT_PROMPT
 
@@ -1431,15 +1463,15 @@ def build_application(token: str, db: Database, service: BotService):
         user_id = _remember_user(db, update)
         if "edit_bot_id" not in context.user_data:
             return await restart_expired_flow(
-                update, context, "edit", t("choose.edit")
+                update, context, "edit", tr(update, "choose.edit")
             )
         bot_id = int(context.user_data["edit_bot_id"])
         prompt = (update.effective_message.text or "").strip()
         if not prompt:
             await reply_html(
                 update.effective_message,
-                t("edit.empty"),
-                reply_markup=flow_keyboard,
+                tr(update, "edit.empty"),
+                reply_markup=flow_keyboard(locale_for_update(update)),
             )
             return EDIT_PROMPT
         context.user_data["edit_prompt"] = prompt
@@ -1452,14 +1484,14 @@ def build_application(token: str, db: Database, service: BotService):
         user_id = _remember_user(db, update)
         if "edit_bot_id" not in context.user_data:
             return await restart_expired_flow(
-                update, context, "edit", t("choose.edit")
+                update, context, "edit", tr(update, "choose.edit")
             )
         bot_id = int(context.user_data["edit_bot_id"])
         prompt = context.user_data.get("edit_prompt", "")
         answers = context.user_data.get("edit_answers", [])
         force_code = len(answers) >= MAX_FOLLOWUP_ROUNDS
         progress_message = await reply_html(
-            update.effective_message, t("edit.thinking")
+            update.effective_message, tr(update, "edit.thinking")
         )
         decision = service.plan_edit_bot(
             user_id,
@@ -1477,7 +1509,7 @@ def build_application(token: str, db: Database, service: BotService):
             if force_code:
                 await edit_message_html(
                     progress_message,
-                    t("edit.more_detail"),
+                    tr(update, "edit.more_detail"),
                 )
                 context.user_data.clear()
                 return ConversationHandler.END
@@ -1487,7 +1519,7 @@ def build_application(token: str, db: Database, service: BotService):
 
         await edit_message_html(
             progress_message,
-            t("edit.applying"),
+            tr(update, "edit.applying"),
         )
         result = await service.edit_bot_from_decision(
             user_id,
@@ -1499,7 +1531,11 @@ def build_application(token: str, db: Database, service: BotService):
         logger.info(
             "Edit bot result: user_id=%s bot_id=%s ok=%s", user_id, bot_id, result.ok
         )
-        result_markup = bot_actions_keyboard(result.bot_id) if result.bot_id else None
+        result_markup = (
+            bot_actions_keyboard(result.bot_id, locale_for_update(update))
+            if result.bot_id
+            else None
+        )
         await edit_message_result(
             progress_message,
             result.message,
@@ -1511,13 +1547,13 @@ def build_application(token: str, db: Database, service: BotService):
     async def edit_followup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         _remember_user(db, update)
         if "edit_bot_id" not in context.user_data:
-            return await restart_expired_flow(update, context, "edit", t("choose.edit"))
+            return await restart_expired_flow(update, context, "edit", tr(update, "choose.edit"))
         answer = (update.effective_message.text or "").strip()
         if not answer:
             await reply_html(
                 update.effective_message,
-                t("followup.empty"),
-                reply_markup=flow_keyboard,
+                tr(update, "followup.empty"),
+                reply_markup=flow_keyboard(locale_for_update(update)),
             )
             return EDIT_FOLLOWUP
         answers = context.user_data.setdefault("edit_answers", [])
@@ -1579,7 +1615,7 @@ def build_application(token: str, db: Database, service: BotService):
                     detail = f"\n\n<b>Owner detail</b>\n{escape(type(exc).__name__)}: {escape(str(exc))}"
                 await reply_html(
                     update.effective_message,
-                    t("error.unhandled", error_id=error_id)
+                    tr(update, "error.unhandled", error_id=error_id)
                     + f"{detail}",
                 )
             except Exception:
@@ -1682,3 +1718,4 @@ def build_application(token: str, db: Database, service: BotService):
     application.add_handler(CommandHandler("cancel", cancel))
     application.add_error_handler(error_handler)
     return application
+

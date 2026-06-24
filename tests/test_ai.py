@@ -104,6 +104,50 @@ class AIDecisionTests(unittest.TestCase):
                 """
             )
 
+    def test_reject_question_like_message_with_empty_questions(self):
+        with self.assertRaises(AIResponseError) as caught:
+            parse_ai_decision(
+                """
+                {
+                  "type": "code",
+                  "message": "I can help. Could you please clarify the following?",
+                  "questions": [],
+                  "code": "print('ok')",
+                  "env": []
+                }
+                """
+            )
+
+        self.assertIn("questions array is empty", str(caught.exception))
+
+    def test_json_generation_repairs_empty_question_message(self):
+        bad = """
+        {
+          "type": "code",
+          "message": "I can help. Could you please clarify the following?",
+          "questions": [],
+          "code": "print('ok')",
+          "env": []
+        }
+        """
+        fixed = """
+        {
+          "type": "questions",
+          "message": "Who are the admins?",
+          "questions": [{"id": "admin_ids", "question": "Who are the admins?", "suggestions": []}],
+          "code": null,
+          "env": []
+        }
+        """
+        generator = make_generator([bad, fixed])
+
+        decision = generator._generate_json_decision("Original newbot prompt")
+
+        self.assertTrue(decision.needs_questions)
+        self.assertEqual(decision.questions[0].id, "admin_ids")
+        repair_prompt = generator._client.models.calls[1]["contents"]
+        self.assertIn("questions array is empty", repair_prompt)
+
     def test_reject_reserved_env_name(self):
         with self.assertRaises(AIResponseError):
             parse_ai_decision(

@@ -120,6 +120,10 @@ Rules:
 
 
 FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+EMPTY_QUESTION_MESSAGE_RE = re.compile(
+    r"\b(?:clarify(?:\s+\w+){0,4}\s+(?:following|questions?)|answer(?:\s+\w+){0,4}\s+(?:following|questions?)|following\s+questions?|questions?\s+below)\b",
+    re.IGNORECASE,
+)
 QUESTION_KEYS = {"id", "question", "suggestions"}
 ENV_KEYS = {"name", "value"}
 TOP_LEVEL_KEYS = {"type", "message", "questions", "code", "env"}
@@ -181,6 +185,15 @@ def _expect_str(value: Any, field: str, allow_empty: bool = False) -> str:
     if not allow_empty and not value.strip():
         raise AIResponseError(f"AI JSON field '{field}' must not be empty.")
     return value.strip() if not allow_empty else value
+
+
+def _reject_empty_question_message(message: str, questions: tuple[Any, ...]) -> None:
+    if questions:
+        return
+    if EMPTY_QUESTION_MESSAGE_RE.search(message):
+        raise AIResponseError(
+            "AI message asks the user to answer or clarify questions, but the JSON questions array is empty."
+        )
 
 
 def parse_ai_decision(text: str) -> AIDecision:
@@ -264,6 +277,9 @@ def parse_ai_decision(text: str) -> AIDecision:
             )
         )
 
+    parsed_questions = tuple(questions)
+    _reject_empty_question_message(message, parsed_questions)
+
     if decision_type == "questions":
         if not questions:
             raise AIResponseError(
@@ -277,7 +293,7 @@ def parse_ai_decision(text: str) -> AIDecision:
             raise AIResponseError(
                 "AI JSON type 'questions' must not include env values."
             )
-        return AIDecision("questions", message, tuple(questions), None, ())
+        return AIDecision("questions", message, parsed_questions, None, ())
 
     if not isinstance(code, str) or not code.strip():
         raise AIResponseError("AI JSON type 'code' requires non-empty code.")
@@ -340,6 +356,7 @@ def parse_readiness_decision(text: str) -> AIReadinessDecision:
         )
     message = _expect_str(data.get("message", ""), "message", allow_empty=True).strip()
     questions = _parse_questions(data)
+    _reject_empty_question_message(message, questions)
 
     if decision_type == "ready":
         if questions:
