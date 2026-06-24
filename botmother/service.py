@@ -69,6 +69,29 @@ def answered_localization(answer_history: list[dict]) -> bool:
     return False
 
 
+async def fetch_bot_username(token: str) -> str | None:
+    try:
+        from telegram import Bot
+    except ImportError:
+        return None
+
+    bot = Bot(token)
+    try:
+        me = await bot.get_me()
+        username = str(getattr(me, "username", "") or "").strip().lstrip("@")
+        return username or None
+    except Exception:
+        logger.exception("Failed to fetch child bot username from Telegram")
+        return None
+    finally:
+        shutdown = getattr(bot, "shutdown", None)
+        if callable(shutdown):
+            try:
+                await shutdown()
+            except Exception:
+                logger.debug("Ignoring child bot shutdown error after get_me")
+
+
 class BotService:
     def __init__(
         self,
@@ -122,6 +145,12 @@ class BotService:
         answer_history: list[dict],
         decision: AIDecision,
     ) -> AIReadinessDecision:
+        if answer_history:
+            logger.info(
+                "Skipping readiness AI check after prior follow-up rounds: answer_rounds=%s",
+                len(answer_history),
+            )
+            return AIReadinessDecision("ready", "", ())
         try:
             return self.generator.check_new_bot_readiness(
                 prompt, answer_history, decision
@@ -252,17 +281,21 @@ class BotService:
                 False, f"Generated code was rejected: {validation.error}"
             )
 
+        bot_username = await fetch_bot_username(token)
         name = prompt_to_name(prompt)
         placeholder = self.settings.workdir / "pending"
         bot_id = self.db.create_bot(user_id, chat_id, name, prompt, token, placeholder)
         bot_dir = self.settings.workdir / str(bot_id)
         self._set_workdir(bot_id, bot_dir)
+        if bot_username:
+            self.db.update_bot_username(bot_id, bot_username)
         logger.info(
-            "Created bot record: bot_id=%s user_id=%s chat_id=%s name=%r",
+            "Created bot record: bot_id=%s user_id=%s chat_id=%s name=%r bot_username=%r",
             bot_id,
             user_id,
             chat_id,
             name,
+            bot_username,
         )
 
         if env_vars:
@@ -520,6 +553,18 @@ class BotService:
         await self.runner.stop_all(mark_stopped=True)
         return OperationResult(True, "🛑 All active child bots were stopped.")
 
+    async def refresh_missing_bot_usernames_for(self, user_id: int) -> None:
+        rows = self.list_bots_for(user_id)
+        for row in rows:
+            if row["deleted_at"] is not None:
+                continue
+            existing_username = str(row["bot_username"] or "").strip()
+            if existing_username:
+                continue
+            fetched_username = await fetch_bot_username(str(row["token"]))
+            if fetched_username:
+                self.db.update_bot_username(int(row["id"]), fetched_username)
+
     def list_bots_for(self, user_id: int):
         if self.is_owner(user_id):
             return self.db.list_bots()
@@ -616,7 +661,11 @@ class BotService:
     ) -> str:
         current = extract_python_code(raw_code)
         validation = validate_generated_code(current)
-        last_valid = current if validation.ok else None
+        if validation.ok:
+            logger.info("Skipping refinement; generated code already validates")
+            return current
+
+        last_valid = None
         last_error = validation.error
         env_names = sorted(env_vars)
 
@@ -644,25 +693,23 @@ class BotService:
             current = candidate
             if candidate_validation.ok:
                 last_valid = candidate
-                last_error = None
                 logger.info(
                     "AI refinement layer accepted: layer=%s/%s code_chars=%s",
                     layer,
                     AI_REFINEMENT_LAYERS,
                     len(candidate),
                 )
-            else:
-                last_error = candidate_validation.error
-                logger.warning(
-                    "AI refinement layer failed validation: layer=%s/%s error=%s",
-                    layer,
-                    AI_REFINEMENT_LAYERS,
-                    last_error,
-                )
+                return last_valid
 
-        if last_valid is not None:
-            return last_valid
-        return current
+            last_error = candidate_validation.error
+            logger.warning(
+                "AI refinement layer failed validation: layer=%s/%s error=%s",
+                layer,
+                AI_REFINEMENT_LAYERS,
+                last_error,
+            )
+
+        return last_valid or current
 
     async def _generate_validate_and_save(
         self, bot_id: int, prompt: str

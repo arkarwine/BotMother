@@ -3,10 +3,10 @@ import unittest
 from botmother.ai import AIDecision, AIQuestion
 from botmother.handlers import (
     chunk_text,
+    compact_bot_label,
     format_ai_questions,
     format_bot_list,
     format_logs,
-    compact_bot_label,
     help_category_text,
     parse_ask_args,
     parse_bot_id,
@@ -73,14 +73,29 @@ class HandlerHelperTests(unittest.TestCase):
         self.assertIn("Buttons", help_category_text("fallback"))
         self.assertIn("BotMother", help_category_text("unknown"))
 
-    def test_format_bot_list(self):
-        text = format_bot_list([FakeRow(id=3, status="running", name="Echo", owner_username="alice")])
+    def test_format_bot_list_uses_bot_username(self):
+        text = format_bot_list(
+            [
+                FakeRow(
+                    id=3,
+                    status="running",
+                    name="Echo",
+                    owner_username="alice",
+                    bot_username="echo_bot",
+                )
+            ]
+        )
         self.assertNotIn("#3", text)
-        self.assertIn("@alice", text)
+        self.assertIn("@echo_bot", text)
+        self.assertNotIn("@alice", text)
         self.assertIn("running", text)
 
     def test_compact_bot_label_truncates_long_names(self):
-        text = compact_bot_label(FakeRow(id=3, status="running", name="Very long bot name that should shrink"))
+        text = compact_bot_label(
+            FakeRow(
+                id=3, status="running", name="Very long bot name that should shrink"
+            )
+        )
         self.assertNotIn("#3", text)
         self.assertIn("🟢", text)
         self.assertLessEqual(len(text), 38)

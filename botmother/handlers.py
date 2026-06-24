@@ -167,6 +167,13 @@ def owner_label(row: Any) -> str:
     return full_name or "Owner"
 
 
+def bot_username_label(row: Any) -> str | None:
+    username = str(row_value(row, "bot_username", "") or "").strip().lstrip("@")
+    if not username:
+        return None
+    return f"@{username}"
+
+
 def bot_title(row: Any) -> str:
     return str(row["name"])
 
@@ -176,10 +183,11 @@ def format_bot_list(rows: list[Any]) -> str:
         return "<b>🪄 No child bots yet</b>\n\nTap <b>New Bot</b> to create one, or open <b>Examples</b> for ideas."
     lines = ["<b>📦 Your Bots</b>", "", "Tap a bot to open actions.", ""]
     for row in rows:
-        lines.append(
-            f"{escape(status_badge(row['status']))}  <b>{escape(bot_title(row))}</b>\n"
-            f"<i>{escape(owner_label(row))}</i>"
-        )
+        line = f"{escape(status_badge(row['status']))}  <b>{escape(bot_title(row))}</b>"
+        username = bot_username_label(row)
+        if username:
+            line += f"\n<i>{escape(username)}</i>"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -729,6 +737,7 @@ def build_application(token: str, db: Database, service: BotService):
 
     async def bots(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = _remember_user(db, update)
+        await service.refresh_missing_bot_usernames_for(user_id)
         rows = service.list_bots_for(user_id)
         logger.info("Command /bots: user_id=%s count=%s", user_id, len(rows))
         await reply_html(
@@ -742,6 +751,7 @@ def build_application(token: str, db: Database, service: BotService):
         bot_id = parse_bot_id(context.args)
         logger.info("Command /status: user_id=%s bot_id=%s", user_id, bot_id)
         if bot_id is None:
+            await service.refresh_missing_bot_usernames_for(user_id)
             rows = service.list_bots_for(user_id)
             await reply_html(
                 update.effective_message,
@@ -1011,6 +1021,7 @@ def build_application(token: str, db: Database, service: BotService):
             )
             return
         if data == "nav:bots":
+            await service.refresh_missing_bot_usernames_for(user_id)
             rows = service.list_bots_for(user_id)
             await reply_html(
                 update.effective_message,

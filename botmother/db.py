@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
-from pathlib import Path
 import sqlite3
 import time
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Iterable, Iterator
-
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -26,6 +25,7 @@ CREATE TABLE IF NOT EXISTS bots (
     name TEXT NOT NULL,
     prompt TEXT NOT NULL,
     token TEXT NOT NULL UNIQUE,
+    bot_username TEXT,
     status TEXT NOT NULL,
     pid INTEGER,
     workdir TEXT NOT NULL,
@@ -81,6 +81,14 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.session() as conn:
             conn.executescript(SCHEMA)
+            self._ensure_bot_username_column(conn)
+
+    def _ensure_bot_username_column(self, conn: sqlite3.Connection) -> None:
+        columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(bots)").fetchall()
+        }
+        if "bot_username" not in columns:
+            conn.execute("ALTER TABLE bots ADD COLUMN bot_username TEXT")
 
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
@@ -97,7 +105,13 @@ class Database:
         finally:
             conn.close()
 
-    def upsert_user(self, user_id: int, username: str | None, first_name: str | None, last_name: str | None) -> None:
+    def upsert_user(
+        self,
+        user_id: int,
+        username: str | None,
+        first_name: str | None,
+        last_name: str | None,
+    ) -> None:
         now = int(time.time())
         with self.session() as conn:
             conn.execute(
@@ -113,7 +127,15 @@ class Database:
                 (user_id, username, first_name, last_name, now, now),
             )
 
-    def create_bot(self, owner_user_id: int, chat_id: int, name: str, prompt: str, token: str, workdir: Path) -> int:
+    def create_bot(
+        self,
+        owner_user_id: int,
+        chat_id: int,
+        name: str,
+        prompt: str,
+        token: str,
+        workdir: Path,
+    ) -> int:
         now = int(time.time())
         with self.session() as conn:
             cur = conn.execute(
@@ -187,7 +209,9 @@ class Database:
             )
             return int(cur.rowcount)
 
-    def list_bots(self, owner_user_id: int | None = None, include_deleted: bool = False) -> list[sqlite3.Row]:
+    def list_bots(
+        self, owner_user_id: int | None = None, include_deleted: bool = False
+    ) -> list[sqlite3.Row]:
         clauses = []
         params: list[Any] = []
         if owner_user_id is not None:
@@ -248,7 +272,9 @@ class Database:
                 ).fetchall()
             )
 
-    def update_bot_status(self, bot_id: int, status: str, pid: int | None = None) -> None:
+    def update_bot_status(
+        self, bot_id: int, status: str, pid: int | None = None
+    ) -> None:
         now = int(time.time())
         with self.session() as conn:
             conn.execute(
@@ -296,6 +322,14 @@ class Database:
                 (str(workdir), now, bot_id),
             )
 
+    def update_bot_username(self, bot_id: int, bot_username: str | None) -> None:
+        now = int(time.time())
+        with self.session() as conn:
+            conn.execute(
+                "UPDATE bots SET bot_username = ?, updated_at = ? WHERE id = ?",
+                (bot_username, now, bot_id),
+            )
+
     def soft_delete_bot(self, bot_id: int) -> None:
         now = int(time.time())
         with self.session() as conn:
@@ -315,7 +349,9 @@ class Database:
                 (now, now, bot_id),
             )
 
-    def add_log(self, bot_id: int, stream: str, line: str, keep_rows: int = 2000) -> None:
+    def add_log(
+        self, bot_id: int, stream: str, line: str, keep_rows: int = 2000
+    ) -> None:
         now = int(time.time())
         with self.session() as conn:
             conn.execute(

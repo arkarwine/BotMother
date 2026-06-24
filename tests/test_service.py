@@ -65,6 +65,7 @@ class FakeGenerator:
         self.refinement_calls = []
         self.new_bot_calls = 0
         self.new_bot_prompt = None
+        self.readiness_calls = 0
 
     def decide_new_bot(self, prompt: str, answer_history, force_code: bool = False):
         self.new_bot_calls += 1
@@ -92,6 +93,7 @@ class FakeGenerator:
         return self.answer
 
     def check_new_bot_readiness(self, prompt: str, answer_history, decision):
+        self.readiness_calls += 1
         return self.readiness
 
     def refine_code_for_deploy(
@@ -173,6 +175,35 @@ class ServiceEditTests(unittest.TestCase):
             self.assertEqual(decision.type, "code")
             self.assertEqual(generator.new_bot_calls, 1)
 
+    def test_check_new_bot_readiness_skips_extra_ai_after_followups(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _, _, generator, _ = make_service(tmp)
+            decision = AIDecision("code", "Ready.", (), NEW_BOT_CODE, ())
+
+            readiness = service.check_new_bot_readiness(
+                "simple todo bot",
+                [
+                    {
+                        "questions": ["Which languages should it support?"],
+                        "answer": "English only",
+                    }
+                ],
+                decision,
+            )
+
+            self.assertEqual(readiness.type, "ready")
+            self.assertEqual(generator.readiness_calls, 0)
+
+    def test_check_new_bot_readiness_calls_ai_without_followups(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _, _, generator, _ = make_service(tmp)
+            decision = AIDecision("code", "Ready.", (), NEW_BOT_CODE, ())
+
+            readiness = service.check_new_bot_readiness("simple todo bot", [], decision)
+
+            self.assertEqual(readiness.type, "ready")
+            self.assertEqual(generator.readiness_calls, 1)
+
     def test_invalid_prompt_edit_does_not_stop_running_bot(self):
         with tempfile.TemporaryDirectory() as tmp:
             service, db, runner, _, bot_id = make_service(
@@ -209,10 +240,7 @@ class ServiceEditTests(unittest.TestCase):
             self.assertEqual(db.get_bot_env_vars(bot_id), {"WEATHER_API_KEY": "secret"})
             self.assertEqual(generator.current_code, OLD_BOT_CODE)
             self.assertEqual(generator.edit_prompt, "make it friendlier")
-            self.assertEqual(len(generator.refinement_calls), 3)
-            self.assertEqual(
-                generator.refinement_calls[0]["env_names"], ["WEATHER_API_KEY"]
-            )
+            self.assertEqual(len(generator.refinement_calls), 0)
 
     def test_get_source_returns_latest_revision(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 MAX_FOLLOWUP_ROUNDS = 5
 MAX_JSON_REPAIR_ATTEMPTS = 2
-AI_REFINEMENT_LAYERS = 3
+AI_REFINEMENT_LAYERS = 2
 RUNTIME_PROVIDED_ENV = {
     "BOT_TOKEN": "the child Telegram bot token from BotFather; BotMother injects this at launch",
     "BOT_DB_PATH": "the child bot's SQLite database path; BotMother injects this at launch",
