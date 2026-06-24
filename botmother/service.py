@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,12 +18,6 @@ from .runner import ProcessManager
 from .tokens import is_valid_telegram_token, mask_token, redact_telegram_tokens
 
 logger = logging.getLogger(__name__)
-
-LOCALIZATION_SIGNAL_RE = re.compile(
-    r"\b(?:language|languages|locali[sz]ation|locale|multilingual|bilingual|translate|translation|english|burmese|myanmar|japanese|thai|chinese|french|spanish|german|hindi|arabic|korean|vietnamese|russian|portuguese|italian|turkish|indonesian|malay|tagalog)\b",
-    re.IGNORECASE,
-)
-
 
 @dataclass(frozen=True)
 class OperationResult:
@@ -53,20 +46,6 @@ def prompt_to_name(prompt: str) -> str:
     if not name:
         return "Untitled bot"
     return name[:48]
-
-
-def mentions_localization(text: str) -> bool:
-    return bool(LOCALIZATION_SIGNAL_RE.search(text or ""))
-
-
-def answered_localization(answer_history: list[dict]) -> bool:
-    for item in answer_history:
-        questions = item.get("questions", []) or []
-        if any(mentions_localization(str(question)) for question in questions):
-            return True
-        if mentions_localization(str(item.get("answer", ""))):
-            return True
-    return False
 
 
 async def fetch_bot_username(token: str) -> str | None:
@@ -115,28 +94,17 @@ class BotService:
         return self.is_owner(user_id) or int(bot["owner_user_id"]) == user_id
 
     def plan_new_bot(
-        self, prompt: str, answer_history: list[dict], force_code: bool = False
+        self,
+        prompt: str,
+        answer_history: list[dict],
+        force_code: bool = False,
+        user_context: str = "",
     ) -> AIDecision:
-        if (
-            not force_code
-            and not mentions_localization(prompt)
-            and not answered_localization(answer_history)
-        ):
-            return AIDecision(
-                "questions",
-                "Before I design the full bot, which languages should it support? For example: English only, Burmese only, or both English and Burmese.",
-                (
-                    AIQuestion(
-                        "localization_languages",
-                        "Which languages should this bot support?",
-                        ("English only", "Burmese only", "English and Burmese"),
-                    ),
-                ),
-                None,
-                (),
-            )
         return self.generator.decide_new_bot(
-            prompt, answer_history, force_code=force_code
+            prompt,
+            answer_history,
+            force_code=force_code,
+            user_context=user_context,
         )
 
     def check_new_bot_readiness(
@@ -144,16 +112,11 @@ class BotService:
         prompt: str,
         answer_history: list[dict],
         decision: AIDecision,
+        user_context: str = "",
     ) -> AIReadinessDecision:
-        if answer_history:
-            logger.info(
-                "Skipping readiness AI check after prior follow-up rounds: answer_rounds=%s",
-                len(answer_history),
-            )
-            return AIReadinessDecision("ready", "", ())
         try:
             return self.generator.check_new_bot_readiness(
-                prompt, answer_history, decision
+                prompt, answer_history, decision, user_context=user_context
             )
         except Exception as exc:
             logger.exception("Readiness check failed")
@@ -176,6 +139,7 @@ class BotService:
         edit_prompt: str,
         answer_history: list[dict],
         force_code: bool = False,
+        user_context: str = "",
     ) -> AIDecision | OperationResult:
         if not self.can_manage(user_id, bot_id):
             logger.info("Denied edit planning: user_id=%s bot_id=%s", user_id, bot_id)
@@ -192,13 +156,21 @@ class BotService:
             edit_prompt,
             answer_history,
             force_code=force_code,
+            user_context=user_context,
         )
 
     async def create_bot(
-        self, user_id: int, chat_id: int, prompt: str, token: str
+        self,
+        user_id: int,
+        chat_id: int,
+        prompt: str,
+        token: str,
+        user_context: str = "",
     ) -> OperationResult:
-        raw = self.generator.generate_code(prompt)
-        return await self.create_bot_from_code(user_id, chat_id, prompt, token, raw)
+        raw = self.generator.generate_code(prompt, user_context=user_context)
+        return await self.create_bot_from_code(
+            user_id, chat_id, prompt, token, raw, user_context=user_context
+        )
 
     async def create_bot_from_decision(
         self,
@@ -207,11 +179,18 @@ class BotService:
         prompt: str,
         token: str,
         decision: AIDecision,
+        user_context: str = "",
     ) -> OperationResult:
         if decision.type != "code" or not decision.code:
             return OperationResult(False, "AI did not provide code yet.")
         return await self.create_bot_from_code(
-            user_id, chat_id, prompt, token, decision.code, self._env_dict(decision)
+            user_id,
+            chat_id,
+            prompt,
+            token,
+            decision.code,
+            self._env_dict(decision),
+            user_context=user_context,
         )
 
     async def create_bot_from_code(
@@ -222,6 +201,7 @@ class BotService:
         token: str,
         raw_code: str,
         env_vars: dict[str, str] | None = None,
+        user_context: str = "",
     ) -> OperationResult:
         token = token.strip()
         if not is_valid_telegram_token(token):
@@ -268,7 +248,9 @@ class BotService:
                 "🔁 Token already attached\n\nThat token is already attached to another active bot.",
             )
 
-        raw_code = self._refine_code_for_deploy(prompt, raw_code, env_vars or {})
+        raw_code = self._refine_code_for_deploy(
+            prompt, raw_code, env_vars or {}, user_context=user_context
+        )
         code = extract_python_code(raw_code)
         validation = validate_generated_code(code)
         if not validation.ok:
@@ -321,14 +303,24 @@ class BotService:
             )
 
         logger.info("Bot running: bot_id=%s user_id=%s", bot_id, user_id)
+        username = f"@{bot_username}" if bot_username else "Not available yet"
+        env_names = ", ".join(sorted((env_vars or {}).keys())) or "None"
         return OperationResult(
             True,
-            f"✅ {name} is running\n\nToken: {mask_token(token)}\n\nUse the keyboard to view status, inspect logs, or ask about it.",
+            (
+                f"✅ Setup complete\n\n"
+                f"Name\n{name}\n\n"
+                f"Bot username\n{username}\n\n"
+                f"Status\nrunning\n\n"
+                f"Token\n{mask_token(token)}\n\n"
+                f"Extra env vars\n{env_names}\n\n"
+                "Use the action buttons below to inspect, ask, edit, or manage it."
+            ),
             bot_id,
         )
 
     async def revise_bot(
-        self, user_id: int, bot_id: int, prompt: str
+        self, user_id: int, bot_id: int, prompt: str, user_context: str = ""
     ) -> OperationResult:
         if not self.can_manage(user_id, bot_id):
             logger.info("Denied revise: user_id=%s bot_id=%s", user_id, bot_id)
@@ -348,7 +340,9 @@ class BotService:
         self.db.update_bot_status(bot_id, "generating")
         self.db.update_bot_prompt(bot_id, prompt)
 
-        result = await self._generate_validate_and_save(bot_id, prompt)
+        result = await self._generate_validate_and_save(
+            bot_id, prompt, user_context=user_context
+        )
         if not result.ok:
             logger.warning(
                 "Bot revision rejected: bot_id=%s message=%s", bot_id, result.message
@@ -397,6 +391,7 @@ class BotService:
         bot_id: int,
         edit_prompt: str,
         decision: AIDecision,
+        user_context: str = "",
     ) -> OperationResult:
         if not self.can_manage(user_id, bot_id):
             logger.info("Denied edit: user_id=%s bot_id=%s", user_id, bot_id)
@@ -413,7 +408,10 @@ class BotService:
         existing_env_vars = self.db.get_bot_env_vars(bot_id)
         refinement_env_vars = {**existing_env_vars, **env_vars}
         raw_code = self._refine_code_for_deploy(
-            f"Edit request: {edit_prompt}", decision.code, refinement_env_vars
+            f"Edit request: {edit_prompt}",
+            decision.code,
+            refinement_env_vars,
+            user_context=user_context,
         )
         code = extract_python_code(raw_code)
         validation = validate_generated_code(code)
@@ -657,7 +655,11 @@ class BotService:
         return redacted
 
     def _refine_code_for_deploy(
-        self, prompt: str, raw_code: str, env_vars: dict[str, str]
+        self,
+        prompt: str,
+        raw_code: str,
+        env_vars: dict[str, str],
+        user_context: str = "",
     ) -> str:
         current = extract_python_code(raw_code)
         validation = validate_generated_code(current)
@@ -678,6 +680,7 @@ class BotService:
                     layer,
                     AI_REFINEMENT_LAYERS,
                     last_error,
+                    user_context=user_context,
                 )
             except Exception as exc:
                 logger.exception(
@@ -712,14 +715,17 @@ class BotService:
         return last_valid or current
 
     async def _generate_validate_and_save(
-        self, bot_id: int, prompt: str
+        self, bot_id: int, prompt: str, user_context: str = ""
     ) -> OperationResult:
         logger.info(
             "Generating revision: bot_id=%s prompt_chars=%s", bot_id, len(prompt)
         )
-        raw = self.generator.generate_code(prompt)
+        raw = self.generator.generate_code(prompt, user_context=user_context)
         raw = self._refine_code_for_deploy(
-            prompt, raw, self.db.get_bot_env_vars(bot_id)
+            prompt,
+            raw,
+            self.db.get_bot_env_vars(bot_id),
+            user_context=user_context,
         )
         code = extract_python_code(raw)
         validation = validate_generated_code(code)

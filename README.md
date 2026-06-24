@@ -59,9 +59,9 @@ PYTHON_BIN=/home/ubuntu/BotMother/.venv/bin/python
 
 ## Telegram Controls
 
-BotMother is designed as a tap-first manager. The persistent keyboard contains the common actions, and BotMother opens inline bot pickers whenever an action needs a specific child bot. Users normally do not need to type bot IDs.
+BotMother is designed as a tap-first manager. `/start` removes the old persistent reply keyboard and opens an inline home menu. Bot lists, bot details, confirmations, help categories, and setup results use inline buttons so users normally do not need to type bot IDs.
 
-Keyboard actions:
+Inline actions:
 
 - `🪄 New Bot` - create and launch a child bot; AI may ask follow-up questions first.
 - `📦 My Bots` - list your bots and open per-bot action buttons.
@@ -71,9 +71,9 @@ Keyboard actions:
 - `♻️ Revise` - choose a bot and regenerate it from a fresh prompt.
 - `🧾 Logs` - choose a bot and view recent stdout/stderr.
 - `🔄 Restart`, `🛑 Stop`, `🗑️ Delete` - choose a bot, then run the operation.
-- `✨ Examples`, `🪪 Profile`, `🩺 Health`, `❔ Help`, `❌ Cancel` - open examples, username/profile info, health, category help, or leave the current flow.
+- `✨ Examples`, `🪪 Profile`, `🩺 Health`, `📚 Help`, `❌ Cancel` - open examples, full Telegram profile/chat info, health, category help, or leave the current flow.
 
-The Help button opens category menus with inline buttons for Create, Manage, Operations, Utilities, and command fallbacks.
+The Help menu opens category screens with inline buttons for Create, Manage, Operations, Utilities, and command fallbacks. Bot-specific screens include action buttons only when they are useful.
 
 Typed commands remain available as a fallback and for power users:
 
@@ -91,7 +91,7 @@ Typed commands remain available as a fallback and for power users:
 - `/restart [id]` - restart one child bot; opens a picker when no id is given.
 - `/delete [id]` - stop and soft-delete one child bot; opens a picker when no id is given.
 - `/revise [id]` - regenerate a child bot from a new prompt; opens a picker when no id is given.
-- `/id`, `/whoami` - show your Telegram user ID for admin configuration.
+- `/id`, `/whoami` - show your full Telegram user/chat info for admin configuration.
 - `/health` - show manager and child-process health summary.
 - `/killall` - owner-only emergency stop.
 - `/cancel` - cancel an active create/revise flow.
@@ -128,6 +128,16 @@ If the AI asks for an external API key or config value, BotMother stores the sup
 
 BotMother always injects `BOT_TOKEN`, `BOT_DB_PATH`, `PATH`, `PYTHONUNBUFFERED`, and `PYTHONIOENCODING` itself. The AI planner is told not to include those names in generated env values; if it does anyway, BotMother asks Gemini to repair the JSON response with the validation error before continuing.
 
+## Localization
+
+Manager UI text is loaded from JSON locale files under `botmother/locales/`. English is the only included locale for now:
+
+```text
+botmother/locales/en.json
+```
+
+Generated bots default to English unless the user explicitly asks for another language or multilingual support. BotMother no longer asks a separate localization question before planning.
+
 ## Security Notes
 
 This is intentionally a testing-mode builder. Child tokens are stored plaintext in SQLite. Generated code is still dangerous by nature, so BotMother uses:
@@ -160,7 +170,7 @@ BotMother writes its own process logs to console and to `BOTMOTHER_LOG_FILE`, de
 tail -f ./data/botmother.log
 ```
 
-Child bot stdout/stderr is still available through the Logs keyboard button, `/tail`, `/logs`, and per-bot files under `data/bots/<id>/`.
+Child bot stdout/stderr is still available through the Logs action, `/tail`, `/logs`, and per-bot files under `data/bots/<id>/`.
 
 Negative child process return codes mean Linux signals. For example, `rc=-2` is `SIGINT`. BotMother logs signal names and will retry unexpected signal exits a bounded number of times.
 
@@ -170,10 +180,10 @@ Tap `✏️ Edit Bot`, choose the bot, then describe the change you want in norm
 
 ## AI Follow-Ups
 
-For New Bot and Edit Bot, BotMother asks Gemini for a strict JSON decision. The decision type is either `questions` or `code`. When the AI returns questions, BotMother sends Gemini's user-facing message directly, then sends the user's answer back into the next AI turn. The structured question fields are internal only, so BotMother does not add visible question numbers, suggestion labels, or follow-up counters. To avoid endless loops, BotMother allows up to 5 internal follow-up rounds, then forces a final code decision or ends the flow if the AI still cannot proceed safely.
+For New Bot and Edit Bot, BotMother asks Gemini for a strict JSON decision. The decision type is either `questions` or `code`. BotMother includes useful Telegram user/chat context, such as user ID, username, names, language code, chat ID, and chat type, so Gemini can make better defaults without asking for basic identity details. When the AI returns questions, BotMother sends Gemini's user-facing message directly, then sends the user's answer back into the next AI turn. The structured question fields are internal only, so BotMother does not add visible question numbers, suggestion labels, or follow-up counters. To avoid endless loops, BotMother allows up to 5 internal follow-up rounds, then forces a final code decision or ends the flow if the AI still cannot proceed safely.
 
-After the normal `/newbot` questions, BotMother runs a separate readiness check before asking for the BotFather token. This check asks only for missing essential data needed to run the bot, such as required admin IDs, API keys, payment/contact details, or external service settings. It does not ask optional preference questions and it never asks for the Telegram token.
+After the normal `/newbot` questions, BotMother runs a separate readiness check before asking for the BotFather token, including after follow-up answers. This check asks only for missing essential data needed to run the bot, such as required admin IDs, API keys, payment/contact details, or external service settings. It does not ask optional preference questions and it never asks for the Telegram token.
 
-Before saving and launching generated code, BotMother runs 3 AI refinement layers. Each layer must return raw standalone Python. BotMother validates each candidate and keeps the last valid version, so a bad refinement pass cannot overwrite a deployable previous pass.
+Before saving and launching generated code, BotMother runs bounded AI refinement layers. Each layer must return raw standalone Python. BotMother validates each candidate and keeps the last valid version, so a bad refinement pass cannot overwrite a deployable previous pass.
 
 Planner JSON repair is also bounded. If Gemini returns invalid JSON or tries to set reserved runtime env vars such as `BOT_TOKEN`, BotMother sends the validation error back to Gemini for up to 2 repair attempts, then falls back to asking the user to restate the request.

@@ -65,11 +65,19 @@ class FakeGenerator:
         self.refinement_calls = []
         self.new_bot_calls = 0
         self.new_bot_prompt = None
+        self.user_context = None
         self.readiness_calls = 0
 
-    def decide_new_bot(self, prompt: str, answer_history, force_code: bool = False):
+    def decide_new_bot(
+        self,
+        prompt: str,
+        answer_history,
+        force_code: bool = False,
+        user_context: str = "",
+    ):
         self.new_bot_calls += 1
         self.new_bot_prompt = prompt
+        self.user_context = user_context
         self.answer_history = answer_history
         self.force_code = force_code
         return AIDecision("code", "Ready.", (), self.edited_code, self.env)
@@ -80,9 +88,11 @@ class FakeGenerator:
         edit_prompt: str,
         answer_history,
         force_code: bool = False,
+        user_context: str = "",
     ):
         self.current_code = current_code
         self.edit_prompt = edit_prompt
+        self.user_context = user_context
         self.answer_history = answer_history
         self.force_code = force_code
         return AIDecision("code", "Ready.", (), self.edited_code, self.env)
@@ -92,9 +102,17 @@ class FakeGenerator:
         self.bot_question = question
         return self.answer
 
-    def check_new_bot_readiness(self, prompt: str, answer_history, decision):
+    def check_new_bot_readiness(
+        self, prompt: str, answer_history, decision, user_context: str = ""
+    ):
         self.readiness_calls += 1
+        self.user_context = user_context
         return self.readiness
+
+    def generate_code(self, prompt: str, user_context: str = ""):
+        self.new_bot_prompt = prompt
+        self.user_context = user_context
+        return self.edited_code
 
     def refine_code_for_deploy(
         self,
@@ -104,6 +122,7 @@ class FakeGenerator:
         layer: int,
         total_layers: int,
         validation_error=None,
+        user_context: str = "",
     ) -> str:
         self.refinement_calls.append(
             {
@@ -113,6 +132,7 @@ class FakeGenerator:
                 "layer": layer,
                 "total_layers": total_layers,
                 "validation_error": validation_error,
+                "user_context": user_context,
             }
         )
         return current_code
@@ -152,17 +172,22 @@ def make_service(tmp: str, edited_code: str = NEW_BOT_CODE, env=None):
 
 
 class ServiceEditTests(unittest.TestCase):
-    def test_plan_new_bot_asks_for_localization_when_missing(self):
+    def test_plan_new_bot_delegates_without_forced_localization_question(self):
         with tempfile.TemporaryDirectory() as tmp:
             service, _, _, generator, _ = make_service(tmp)
 
-            decision = service.plan_new_bot("simple todo bot", [], force_code=False)
+            decision = service.plan_new_bot(
+                "simple todo bot",
+                [],
+                force_code=False,
+                user_context="Telegram user ID: 1",
+            )
 
-            self.assertTrue(decision.needs_questions)
-            self.assertEqual(decision.questions[0].id, "localization_languages")
-            self.assertEqual(generator.new_bot_calls, 0)
+            self.assertEqual(decision.type, "code")
+            self.assertEqual(generator.new_bot_calls, 1)
+            self.assertEqual(generator.user_context, "Telegram user ID: 1")
 
-    def test_plan_new_bot_skips_localization_question_when_languages_are_given(self):
+    def test_plan_new_bot_still_passes_language_requests_to_ai(self):
         with tempfile.TemporaryDirectory() as tmp:
             service, _, _, generator, _ = make_service(tmp)
 
@@ -175,7 +200,7 @@ class ServiceEditTests(unittest.TestCase):
             self.assertEqual(decision.type, "code")
             self.assertEqual(generator.new_bot_calls, 1)
 
-    def test_check_new_bot_readiness_skips_extra_ai_after_followups(self):
+    def test_check_new_bot_readiness_runs_after_followups(self):
         with tempfile.TemporaryDirectory() as tmp:
             service, _, _, generator, _ = make_service(tmp)
             decision = AIDecision("code", "Ready.", (), NEW_BOT_CODE, ())
@@ -192,7 +217,7 @@ class ServiceEditTests(unittest.TestCase):
             )
 
             self.assertEqual(readiness.type, "ready")
-            self.assertEqual(generator.readiness_calls, 0)
+            self.assertEqual(generator.readiness_calls, 1)
 
     def test_check_new_bot_readiness_calls_ai_without_followups(self):
         with tempfile.TemporaryDirectory() as tmp:
