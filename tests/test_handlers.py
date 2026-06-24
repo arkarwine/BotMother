@@ -39,7 +39,7 @@ class HandlerHelperTests(unittest.TestCase):
         bot_id, limit, error = parse_tail_args([])
         self.assertIsNone(bot_id)
         self.assertEqual(limit, 30)
-        self.assertIn("/tail", error)
+        self.assertIn("Logs", error)
 
     def test_parse_tail_args_rejects_bad_limit(self):
         bot_id, limit, error = parse_tail_args(["12", "nope"])
@@ -63,7 +63,7 @@ class HandlerHelperTests(unittest.TestCase):
         bot_id, question, error = parse_ask_args([])
         self.assertIsNone(bot_id)
         self.assertEqual(question, "")
-        self.assertIn("/ask", error)
+        self.assertIn("Ask Bot", error)
 
     def test_format_empty_bot_list(self):
         self.assertIn("New Bot", format_bot_list([]))
