@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT,
     first_name TEXT,
     last_name TEXT,
+    preferred_locale TEXT,
     first_seen_at INTEGER NOT NULL,
     last_seen_at INTEGER NOT NULL
 );
@@ -82,6 +83,7 @@ class Database:
         with self.session() as conn:
             conn.executescript(SCHEMA)
             self._ensure_bot_username_column(conn)
+            self._ensure_user_preferred_locale_column(conn)
 
     def _ensure_bot_username_column(self, conn: sqlite3.Connection) -> None:
         columns = {
@@ -89,6 +91,13 @@ class Database:
         }
         if "bot_username" not in columns:
             conn.execute("ALTER TABLE bots ADD COLUMN bot_username TEXT")
+
+    def _ensure_user_preferred_locale_column(self, conn: sqlite3.Connection) -> None:
+        columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(users)").fetchall()
+        }
+        if "preferred_locale" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN preferred_locale TEXT")
 
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
@@ -116,8 +125,8 @@ class Database:
         with self.session() as conn:
             conn.execute(
                 """
-                INSERT INTO users (user_id, username, first_name, last_name, first_seen_at, last_seen_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO users (user_id, username, first_name, last_name, preferred_locale, first_seen_at, last_seen_at)
+                VALUES (?, ?, ?, ?, NULL, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     username=excluded.username,
                     first_name=excluded.first_name,
@@ -125,6 +134,30 @@ class Database:
                     last_seen_at=excluded.last_seen_at
                 """,
                 (user_id, username, first_name, last_name, now, now),
+            )
+
+    def get_user_locale(self, user_id: int) -> str | None:
+        with self.session() as conn:
+            row = conn.execute(
+                "SELECT preferred_locale FROM users WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            value = str(row["preferred_locale"] or "").strip()
+            return value or None
+
+    def update_user_locale(self, user_id: int, preferred_locale: str | None) -> None:
+        now = int(time.time())
+        with self.session() as conn:
+            conn.execute(
+                """
+                UPDATE users
+                SET preferred_locale = ?,
+                    last_seen_at = ?
+                WHERE user_id = ?
+                """,
+                (preferred_locale, now, user_id),
             )
 
     def create_bot(

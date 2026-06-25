@@ -71,7 +71,7 @@ Inline actions:
 - `♻️ Revise` - choose a bot and regenerate it from a fresh prompt.
 - `🧾 Logs` - choose a bot and view recent stdout/stderr.
 - `🔄 Restart`, `🛑 Stop`, `🗑️ Delete` - choose a bot, then run the operation.
-- `✨ Examples`, `🪪 Profile`, `🩺 Health`, `📚 Help`, `❌ Cancel` - open examples, full Telegram profile/chat info, health, category help, or leave the current flow.
+- `✨ Examples`, `🪪 Profile`, `🩺 Health`, `🌐 Language`, `📚 Help`, `❌ Cancel` - open examples, full Telegram profile/chat info, health, language settings, category help, or leave the current flow.
 
 The Help menu opens category screens with inline buttons for Create, Manage, Operations, Utilities, and command fallbacks. Bot-specific screens include action buttons only when they are useful.
 
@@ -80,6 +80,7 @@ Typed commands remain available as a fallback and for power users:
 - `/start` - show basic help.
 - `/help`, `/commands`, `/usage` - show the category help menu.
 - `/examples` - show copy-ready bot prompt examples.
+- `/language` - choose English or Myanmar for BotMother menus and messages.
 - `/newbot` - create and launch a child bot.
 - `/bots` - list your bots. Owners see all bots.
 - `/status [id]` - show one child bot status, or open the bot list when no id is given.
@@ -138,6 +139,8 @@ botmother/locales/my.json
 ```
 
 Generated bots default to English unless the user explicitly asks for another language or multilingual support. BotMother no longer asks a separate localization question before planning.
+
+Users can change the manager language from the `🌐 Language` inline button or `/language`. The choice is stored per Telegram user in SQLite and overrides Telegram's `language_code`.
 
 ## Security Notes
 

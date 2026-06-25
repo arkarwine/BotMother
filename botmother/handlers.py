@@ -227,10 +227,16 @@ def _chat_id(update: Any) -> int:
 def _remember_user(db: Database, update: Any) -> int:
     user_id, username, first_name, last_name = _user_tuple(update)
     db.upsert_user(user_id, username, first_name, last_name)
+    preferred_locale = db.get_user_locale(user_id)
+    if preferred_locale:
+        setattr(update, "_botmother_locale", normalize_locale(preferred_locale))
     return user_id
 
 
 def locale_for_update(update: Any) -> str:
+    preferred_locale = getattr(update, "_botmother_locale", None)
+    if preferred_locale:
+        return normalize_locale(preferred_locale)
     user = getattr(update, "effective_user", None)
     return normalize_locale(getattr(user, "language_code", None))
 
@@ -262,6 +268,7 @@ def user_context_for_ai(update: Any) -> str:
         f"First name: {getattr(user, 'first_name', '') or 'unknown'}",
         f"Last name: {getattr(user, 'last_name', '') or 'none'}",
         f"Language code: {getattr(user, 'language_code', None) or 'unknown'}",
+        f"BotMother locale: {locale_for_update(update)}",
         f"Is bot: {getattr(user, 'is_bot', False)}",
     ]
     if chat is not None:
@@ -289,6 +296,7 @@ def format_user_profile(update: Any, is_owner: bool) -> str:
         ("First name", getattr(user, "first_name", None) or "None"),
         ("Last name", getattr(user, "last_name", None) or "None"),
         ("Language code", getattr(user, "language_code", None) or "Unknown"),
+        ("BotMother locale", locale_for_update(update)),
         ("Is bot", str(getattr(user, "is_bot", False))),
         ("Is premium", str(getattr(user, "is_premium", False))),
         ("Owner access", "Yes" if is_owner else "No"),
@@ -363,6 +371,9 @@ def build_application(token: str, db: Database, service: BotService):
                     InlineKeyboardButton(t("button.profile", locale=locale), callback_data="nav:id"),
                     InlineKeyboardButton(t("button.health", locale=locale), callback_data="nav:health"),
                 ],
+                [
+                    InlineKeyboardButton(t("button.language", locale=locale), callback_data="nav:language"),
+                ],
             ]
         )
 
@@ -380,6 +391,9 @@ def build_application(token: str, db: Database, service: BotService):
                 [
                     InlineKeyboardButton(t("button.operations", locale=locale), callback_data="help:ops"),
                     InlineKeyboardButton(t("button.utilities", locale=locale), callback_data="help:utils"),
+                ],
+                [
+                    InlineKeyboardButton(t("button.language", locale=locale), callback_data="nav:language"),
                 ],
                 [
                     InlineKeyboardButton(
@@ -432,6 +446,7 @@ def build_application(token: str, db: Database, service: BotService):
                     InlineKeyboardButton(t("button.profile", locale=locale), callback_data="nav:id"),
                     InlineKeyboardButton(t("button.health", locale=locale), callback_data="nav:health"),
                 ],
+                [InlineKeyboardButton(t("button.language", locale=locale), callback_data="nav:language")],
                 [InlineKeyboardButton(t("button.examples", locale=locale), callback_data="nav:examples")],
                 [InlineKeyboardButton(t("button.help", locale=locale), callback_data="nav:help")],
             ]
@@ -463,6 +478,7 @@ def build_application(token: str, db: Database, service: BotService):
                     InlineKeyboardButton(t("button.profile", locale=locale), callback_data="nav:id"),
                     InlineKeyboardButton(t("button.health", locale=locale), callback_data="nav:health"),
                 ],
+                [InlineKeyboardButton(t("button.language", locale=locale), callback_data="nav:language")],
                 [
                     InlineKeyboardButton(t("button.examples", locale=locale), callback_data="nav:examples"),
                     InlineKeyboardButton(t("button.cancel", locale=locale), callback_data="nav:cancel"),
@@ -478,6 +494,17 @@ def build_application(token: str, db: Database, service: BotService):
                 [InlineKeyboardButton(t("button.help", locale=locale), callback_data="nav:help")],
             ]
         return InlineKeyboardMarkup(rows)
+
+    def language_keyboard(locale: str = "en"):
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(t("button.language_en", locale=locale), callback_data="lang:en"),
+                    InlineKeyboardButton(t("button.language_my", locale=locale), callback_data="lang:my"),
+                ],
+                [InlineKeyboardButton(t("button.home", locale=locale), callback_data="nav:home")],
+            ]
+        )
 
     def empty_state_keyboard(locale: str = "en"):
         return InlineKeyboardMarkup(
@@ -650,6 +677,18 @@ def build_application(token: str, db: Database, service: BotService):
             update.effective_message,
             t("help.menu_title", locale=locale),
             reply_markup=help_menu_keyboard(locale),
+        )
+
+    async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = _remember_user(db, update)
+        locale = locale_for_update(update)
+        logger.info(
+            "Command /language: user_id=%s chat_id=%s", user_id, _chat_id(update)
+        )
+        await reply_html(
+            update.effective_message,
+            t("language.title", locale=locale),
+            reply_markup=language_keyboard(locale),
         )
 
     async def examples(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1153,6 +1192,26 @@ def build_application(token: str, db: Database, service: BotService):
                 reply_markup=home_menu_keyboard(locale_for_update(update)),
             )
             return
+        if data == "nav:language":
+            await edit_or_reply_html(
+                update,
+                tr(update, "language.title"),
+                reply_markup=language_keyboard(locale_for_update(update)),
+            )
+            return
+        if data.startswith("lang:"):
+            selected_locale = normalize_locale(data.split(":", 1)[1])
+            db.update_user_locale(user_id, selected_locale)
+            setattr(update, "_botmother_locale", selected_locale)
+            await edit_or_reply_html(
+                update,
+                t(
+                    "language.changed_my" if selected_locale == "my" else "language.changed",
+                    locale=selected_locale,
+                ),
+                reply_markup=home_menu_keyboard(selected_locale),
+            )
+            return
         if data == "nav:help":
             await edit_or_reply_html(
                 update,
@@ -1573,6 +1632,7 @@ def build_application(token: str, db: Database, service: BotService):
                 BotCommand("start", "Show help"),
                 BotCommand("help", "Show full guide"),
                 BotCommand("examples", "Prompt examples"),
+                BotCommand("language", "Change language"),
                 BotCommand("newbot", "Create and launch a child bot"),
                 BotCommand("bots", "List your child bots"),
                 BotCommand("status", "Show bot status, or list all bots"),
@@ -1691,6 +1751,7 @@ def build_application(token: str, db: Database, service: BotService):
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("commands", help_command))
     application.add_handler(CommandHandler("usage", help_command))
+    application.add_handler(CommandHandler("language", language_command))
     application.add_handler(CommandHandler("examples", examples))
     application.add_handler(CommandHandler("id", identity))
     application.add_handler(CommandHandler("whoami", identity))

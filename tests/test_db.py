@@ -37,6 +37,19 @@ class DatabaseTests(unittest.TestCase):
             db.set_bot_env_vars(bot_id, {"WEATHER_API_KEY": "secret"})
             self.assertEqual(db.get_bot_env_vars(bot_id), {"WEATHER_API_KEY": "secret"})
 
+    def test_user_locale_preference_survives_user_updates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "botmother.sqlite3")
+            db.initialize()
+            db.upsert_user(1, "user", "First", "Last")
+
+            self.assertIsNone(db.get_user_locale(1))
+            db.update_user_locale(1, "my")
+            self.assertEqual(db.get_user_locale(1), "my")
+
+            db.upsert_user(1, "updated", "Updated", "Name")
+            self.assertEqual(db.get_user_locale(1), "my")
+
     def test_soft_delete_hides_bot(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Database(Path(tmp) / "botmother.sqlite3")
