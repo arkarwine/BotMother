@@ -120,6 +120,36 @@ class AIDecisionTests(unittest.TestCase):
 
         self.assertIn("questions array is empty", str(caught.exception))
 
+    def test_reject_soft_detail_request_with_empty_questions(self):
+        with self.assertRaises(AIResponseError) as caught:
+            parse_ai_decision(
+                """
+                {
+                  "type": "code",
+                  "message": "I will build your e-commerce bot. To ensure it fits your needs perfectly, please provide a few more details:",
+                  "questions": [],
+                  "code": "print('ok')",
+                  "env": []
+                }
+                """
+            )
+
+        self.assertIn("questions array is empty", str(caught.exception))
+
+    def test_reject_readiness_detail_request_with_empty_questions(self):
+        with self.assertRaises(AIResponseError) as caught:
+            parse_readiness_decision(
+                """
+                {
+                  "type": "ready",
+                  "message": "Before launch, I need a few more details.",
+                  "questions": []
+                }
+                """
+            )
+
+        self.assertIn("questions array is empty", str(caught.exception))
+
     def test_json_generation_repairs_empty_question_message(self):
         bad = """
         {

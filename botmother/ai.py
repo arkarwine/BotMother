@@ -81,6 +81,7 @@ Rules:
 - Ask 1-3 material questions only when behavior, storage, commands, admin policy, schedules, external services, or env vars are required and unclear.
 - Default to English. Do not ask a localization question unless the user explicitly requests multiple languages or translation.
 - For questions: put the full natural follow-up in "message"; keep "questions" as internal mirrors. No labels like "Suggestions:", schema talk, counters, or limits.
+- If "message" asks the user for more details, "type" must be "questions" and "questions" must contain the concrete questions.
 - For code: return complete standalone bot.py and env only for explicit user-provided non-runtime values. Do not invent secrets.
 - If needed external config/API keys are missing, ask.
 - Never set runtime env names in env: {", ".join(sorted(RESERVED_ENV_NAMES))}. Code may read os.environ["BOT_TOKEN"] and os.environ["BOT_DB_PATH"].
@@ -116,12 +117,22 @@ Rules:
 - Never ask for Telegram/BotFather token or runtime env vars ({", ".join(sorted(RESERVED_ENV_NAMES))}); BotMother injects them.
 - Use "ready" if no essential data is missing; otherwise ask 1-3 essential questions.
 - Put the full natural user-facing follow-up in "message"; keep "questions" as internal mirrors. No labels, counters, or schema talk.
+- If "message" asks the user for more details, "questions" must contain the concrete questions.
 """
 
 
 FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 EMPTY_QUESTION_MESSAGE_RE = re.compile(
-    r"\b(?:clarify(?:\s+\w+){0,4}\s+(?:following|questions?)|answer(?:\s+\w+){0,4}\s+(?:following|questions?)|following\s+questions?|questions?\s+below)\b",
+    r"\b(?:"
+    r"clarify(?:\s+\w+){0,6}\s+(?:following|questions?|details?)|"
+    r"answer(?:\s+\w+){0,6}\s+(?:following|questions?|details?)|"
+    r"(?:please\s+)?provide(?:\s+\w+){0,6}\s+(?:details?|information|answers?)|"
+    r"(?:need|needs|needed|require|requires|required)(?:\s+\w+){0,6}\s+(?:details?|information|clarification|answers?)|"
+    r"few\s+more\s+details?|"
+    r"more\s+details?|"
+    r"following\s+questions?|"
+    r"questions?\s+below"
+    r")\b",
     re.IGNORECASE,
 )
 QUESTION_KEYS = {"id", "question", "suggestions"}
