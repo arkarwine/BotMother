@@ -225,10 +225,17 @@ def question_texts(decision: AIDecision | AIReadinessDecision) -> list[str]:
 def format_ai_questions(decision: AIDecision | AIReadinessDecision) -> str:
     if decision.needs_questions and not decision.questions:
         return "I need a little more detail before building."
-    if decision.message.strip():
-        return decision.message.strip()
-    if decision.questions:
-        return "\n\n".join(question.question for question in decision.questions)
+    questions = [question.question.strip() for question in decision.questions if question.question.strip()]
+    message = decision.message.strip()
+    if decision.needs_questions and questions:
+        visible_questions = [question for question in questions if question not in message]
+        if message and visible_questions:
+            return message + "\n\n" + "\n\n".join(visible_questions)
+        if message:
+            return message
+        return "\n\n".join(questions)
+    if message:
+        return message
     return "I need a little more detail before building."
 
 

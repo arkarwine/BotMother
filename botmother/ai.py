@@ -81,7 +81,8 @@ Rules:
 - Ask material questions when behavior, storage, commands, admin policy, schedules, external services, or env vars are required and unclear.
 - Default to English.
 - Ask one question at a time.
-- If "message" asks the user for more details, "type" must be "questions" and "questions" must contain the concrete questions.
+- For type "questions", "questions" is mandatory and must contain the exact concrete user-facing question(s).
+- Do not put only a preamble in "message". If "message" asks for more details, it must also include the concrete question text from "questions".
 - For code: return complete standalone bot.py and env only for explicit user-provided non-runtime values. Do not invent secrets.
 - If needed external config/API keys are missing, ask.
 - Never set runtime env names in env: {", ".join(sorted(RESERVED_ENV_NAMES))}. Code may read os.environ["BOT_TOKEN"] and os.environ["BOT_DB_PATH"].
@@ -116,7 +117,8 @@ Rules:
 - Do not ask optional preference/polish questions.
 - Never ask for Telegram/BotFather token or runtime env vars ({", ".join(sorted(RESERVED_ENV_NAMES))}); BotMother injects them.
 - Use "ready" if no essential data is missing; otherwise ask essential questions.
-- If "message" asks the user for more details, "questions" must contain the concrete questions.
+- For type "questions", "questions" is mandatory and must contain the exact concrete user-facing question(s).
+- Do not put only a preamble in "message". If "message" asks for more details, it must also include the concrete question text from "questions".
 """
 
 

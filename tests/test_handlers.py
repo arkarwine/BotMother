@@ -147,7 +147,7 @@ class HandlerHelperTests(unittest.TestCase):
         self.assertIn("Mode: custom bot", text)
         self.assertIn("custom workflow", text)
 
-    def test_format_ai_questions_uses_ai_message_verbatim(self):
+    def test_format_ai_questions_appends_structured_questions_after_message(self):
         decision = AIDecision(
             "questions",
             "Admin ID တွေ ပေးပါ။ KPay ကို ဖုန်းနံပါတ်နဲ့ပြမလား၊ QR နဲ့ပြမလား?",
@@ -161,9 +161,45 @@ class HandlerHelperTests(unittest.TestCase):
 
         text = format_ai_questions(decision)
 
-        self.assertEqual(text, decision.message)
+        self.assertIn(decision.message, text)
+        self.assertIn("Admin IDs?", text)
+        self.assertIn("Payment display?", text)
         self.assertNotIn("Suggestions:", text)
         self.assertNotIn("Follow-up", text)
+
+    def test_format_ai_questions_never_drops_questions_for_vague_preamble(self):
+        decision = AIDecision(
+            "questions",
+            "I will create a complete E-commerce bot for you. Could you please clarify a few details?",
+            (
+                AIQuestion("product_types", "What product categories will your store sell?", ()),
+                AIQuestion("admin_ids", "Which Telegram user IDs should receive order notifications?", ()),
+            ),
+            None,
+            (),
+        )
+
+        text = format_ai_questions(decision)
+
+        self.assertIn("Could you please clarify a few details?", text)
+        self.assertIn("What product categories will your store sell?", text)
+        self.assertIn("Which Telegram user IDs should receive order notifications?", text)
+
+    def test_format_ai_questions_never_drops_questions_for_burmese_preamble(self):
+        decision = AIDecision(
+            "questions",
+            "အွန်လိုင်းစတိုးအတွက် စနစ်တကျပြင်ဆင်ပေးပါမည်။ အောက်ပါအချက်အလက်များကို သိရှိလိုပါသည်။",
+            (
+                AIQuestion("products", "မည်သည့်ပစ္စည်းအမျိုးအစားများကို ရောင်းချမည်နည်း?", ()),
+            ),
+            None,
+            (),
+        )
+
+        text = format_ai_questions(decision)
+
+        self.assertIn("အောက်ပါအချက်အလက်များကို သိရှိလိုပါသည်", text)
+        self.assertIn("မည်သည့်ပစ္စည်းအမျိုးအစားများကို ရောင်းချမည်နည်း?", text)
 
     def test_remember_user_uses_locale_cache_for_slot_restricted_updates(self):
         USER_LOCALE_CACHE.clear()
