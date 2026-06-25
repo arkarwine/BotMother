@@ -8,27 +8,31 @@ from botmother.config import Settings
 from botmother.db import Database
 from botmother.service import BotService
 
-OLD_BOT_CODE = """async def error_handler(update, context):
+OLD_BOT_CODE = """from typing import Any
+
+async def error_handler(update, context):
     pass
 
 async def setup(application):
     await application.bot.set_my_commands([])
 
 def main():
-    application = object()
+    application: Any = object()
     application.add_error_handler(error_handler)
 
 VALUE = 'old'
 """
 
-NEW_BOT_CODE = """async def error_handler(update, context):
+NEW_BOT_CODE = """from typing import Any
+
+async def error_handler(update, context):
     pass
 
 async def setup(application):
     await application.bot.set_my_commands([])
 
 def main():
-    application = object()
+    application: Any = object()
     application.add_error_handler(error_handler)
 
 VALUE = 'new'

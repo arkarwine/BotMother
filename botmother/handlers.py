@@ -381,6 +381,21 @@ def build_application(token: str, db: Database, service: BotService):
             [[InlineKeyboardButton(t("button.cancel", locale=locale), callback_data="nav:cancel")]]
         )
 
+    def ai_response_keyboard(flow: str, locale: str = "en"):
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        t("button.reprompt", locale=locale),
+                        callback_data=f"reprompt:{flow}",
+                    ),
+                    InlineKeyboardButton(
+                        t("button.cancel", locale=locale), callback_data="nav:cancel"
+                    ),
+                ]
+            ]
+        )
+
     def main_reply_keyboard(locale: str = "en"):
         return ReplyKeyboardMarkup(
             [
@@ -850,7 +865,11 @@ def build_application(token: str, db: Database, service: BotService):
                 context.user_data.clear()
                 return ConversationHandler.END
             context.user_data["newbot_pending_questions"] = question_texts(decision)
-            await edit_message_html(progress_message, format_ai_questions(decision))
+            await edit_message_html(
+                progress_message,
+                format_ai_questions(decision),
+                reply_markup=ai_response_keyboard("newbot", locale_for_update(update)),
+            )
             return NEW_FOLLOWUP
 
         readiness = service.check_new_bot_readiness(
@@ -868,7 +887,11 @@ def build_application(token: str, db: Database, service: BotService):
                 context.user_data.clear()
                 return ConversationHandler.END
             context.user_data["newbot_pending_questions"] = question_texts(readiness)
-            await edit_message_html(progress_message, format_ai_questions(readiness))
+            await edit_message_html(
+                progress_message,
+                format_ai_questions(readiness),
+                reply_markup=ai_response_keyboard("newbot", locale_for_update(update)),
+            )
             return NEW_FOLLOWUP
 
         context.user_data["newbot_decision"] = decision
@@ -876,6 +899,7 @@ def build_application(token: str, db: Database, service: BotService):
             progress_message,
             (escape(decision.message.strip()) + "\n\n" if decision.message else "")
             + tr(update, "newbot.token"),
+            reply_markup=ai_response_keyboard("newbot", locale_for_update(update)),
         )
         return NEW_TOKEN
 
@@ -900,6 +924,37 @@ def build_application(token: str, db: Database, service: BotService):
         )
         context.user_data.pop("newbot_pending_questions", None)
         return await continue_newbot_planning(update, context)
+
+    async def newbot_reprompt(
+        update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        query = update.callback_query
+        if query is not None:
+            await query.answer()
+        user_id = _remember_user(db, update)
+        logger.info("Re-prompt newbot: user_id=%s", user_id)
+        user_context = user_context_for_ai(update)
+        context.user_data.clear()
+        context.user_data["newbot_user_context"] = user_context
+        await edit_or_reply_html(
+            update,
+            tr(update, "newbot.reprompt"),
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            tr(update, "button.examples"), callback_data="nav:examples"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            tr(update, "button.cancel"), callback_data="nav:cancel"
+                        )
+                    ],
+                ]
+            ),
+        )
+        return NEW_PROMPT
 
     async def newbot_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         user_id = _remember_user(db, update)
@@ -1635,7 +1690,11 @@ def build_application(token: str, db: Database, service: BotService):
                 context.user_data.clear()
                 return ConversationHandler.END
             context.user_data["edit_pending_questions"] = question_texts(decision)
-            await edit_message_html(progress_message, format_ai_questions(decision))
+            await edit_message_html(
+                progress_message,
+                format_ai_questions(decision),
+                reply_markup=ai_response_keyboard("edit", locale_for_update(update)),
+            )
             return EDIT_FOLLOWUP
 
         await edit_message_html(
@@ -1686,6 +1745,32 @@ def build_application(token: str, db: Database, service: BotService):
         )
         context.user_data.pop("edit_pending_questions", None)
         return await continue_edit_planning(update, context)
+
+    async def edit_reprompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        query = update.callback_query
+        if query is not None:
+            await query.answer()
+        user_id = _remember_user(db, update)
+        if "edit_bot_id" not in context.user_data:
+            return await restart_expired_flow(
+                update, context, "edit", tr(update, "choose.edit")
+            )
+        bot_id = int(context.user_data["edit_bot_id"])
+        row = service.get_accessible_bot(user_id, bot_id)
+        if row is None:
+            await edit_or_reply_html(update, bot_not_found_text(update))
+            return ConversationHandler.END
+        logger.info("Re-prompt edit: user_id=%s bot_id=%s", user_id, bot_id)
+        user_context = context.user_data.get("edit_user_context") or user_context_for_ai(update)
+        context.user_data.clear()
+        context.user_data["edit_bot_id"] = bot_id
+        context.user_data["edit_user_context"] = user_context
+        await edit_or_reply_html(
+            update,
+            tr(update, "edit.reprompt", title=escape(bot_title(row))),
+            reply_markup=flow_keyboard(locale_for_update(update)),
+        )
+        return EDIT_PROMPT
 
     async def post_init(application) -> None:
         logger.info("Post-init: restoring child bots")
@@ -1762,8 +1847,14 @@ def build_application(token: str, db: Database, service: BotService):
         ],
         states={
             NEW_PROMPT: [MessageHandler(conversation_text, newbot_prompt)],
-            NEW_FOLLOWUP: [MessageHandler(conversation_text, newbot_followup)],
-            NEW_TOKEN: [MessageHandler(conversation_text, newbot_token)],
+            NEW_FOLLOWUP: [
+                CallbackQueryHandler(newbot_reprompt, pattern=r"^reprompt:newbot$"),
+                MessageHandler(conversation_text, newbot_followup),
+            ],
+            NEW_TOKEN: [
+                CallbackQueryHandler(newbot_reprompt, pattern=r"^reprompt:newbot$"),
+                MessageHandler(conversation_text, newbot_token),
+            ],
         },
         fallbacks=cancel_fallbacks,
     )
@@ -1786,7 +1877,10 @@ def build_application(token: str, db: Database, service: BotService):
         ],
         states={
             EDIT_PROMPT: [MessageHandler(conversation_text, edit_prompt)],
-            EDIT_FOLLOWUP: [MessageHandler(conversation_text, edit_followup)],
+            EDIT_FOLLOWUP: [
+                CallbackQueryHandler(edit_reprompt, pattern=r"^reprompt:edit$"),
+                MessageHandler(conversation_text, edit_followup),
+            ],
         },
         fallbacks=cancel_fallbacks,
     )

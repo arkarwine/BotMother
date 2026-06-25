@@ -149,6 +149,7 @@ This is intentionally a testing-mode builder. Child tokens are stored plaintext 
 - Bubblewrap process isolation on Ubuntu.
 - Syntax validation with `ast.parse`.
 - A small denylist for obvious host-risk imports and calls.
+- Static checks for obvious generated-code bugs, including a lightweight AST pass and a `mypy` pass when installed.
 - Per-bot work directories.
 - Owner-only `/killall`.
 
@@ -188,6 +189,6 @@ For New Bot and Edit Bot, BotMother asks Gemini for a strict JSON decision. The 
 
 After the normal `/newbot` questions, BotMother runs a separate readiness check before asking for the BotFather token, including after follow-up answers. This check asks only for missing essential data needed to run the bot, such as required admin IDs, API keys, payment/contact details, or external service settings. It does not ask optional preference questions and it never asks for the Telegram token.
 
-Before saving and launching generated code, BotMother runs bounded AI refinement layers. Each layer must return raw standalone Python. BotMother validates each candidate and keeps the last valid version, so a bad refinement pass cannot overwrite a deployable previous pass.
+Before saving and launching generated code, BotMother runs bounded AI refinement layers. Each layer must return raw standalone Python. BotMother validates each candidate with syntax, denylist, static AST, required Telegram UX hooks, and `mypy` checks, then keeps the last valid version, so a bad refinement pass cannot overwrite a deployable previous pass.
 
 Planner JSON repair is also bounded. If Gemini returns invalid JSON or tries to set reserved runtime env vars such as `BOT_TOKEN`, BotMother sends the validation error back to Gemini for up to 2 repair attempts, then falls back to asking the user to restate the request.
