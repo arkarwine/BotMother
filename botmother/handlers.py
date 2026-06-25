@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from html import escape
 from typing import Any
@@ -49,6 +50,8 @@ HELP_CATEGORY_TEXTS = {
 }
 
 EXAMPLES_TEXT = t("examples.text")
+
+USER_LOCALE_CACHE: dict[int, str] = {}
 
 
 def parse_bot_id(args: list[str]) -> int | None:
@@ -229,15 +232,15 @@ def _remember_user(db: Database, update: Any) -> int:
     db.upsert_user(user_id, username, first_name, last_name)
     preferred_locale = db.get_user_locale(user_id)
     if preferred_locale:
-        setattr(update, "_botmother_locale", normalize_locale(preferred_locale))
+        USER_LOCALE_CACHE[user_id] = normalize_locale(preferred_locale)
     return user_id
 
 
 def locale_for_update(update: Any) -> str:
-    preferred_locale = getattr(update, "_botmother_locale", None)
-    if preferred_locale:
-        return normalize_locale(preferred_locale)
     user = getattr(update, "effective_user", None)
+    user_id = getattr(user, "id", None)
+    if user_id is not None and int(user_id) in USER_LOCALE_CACHE:
+        return USER_LOCALE_CACHE[int(user_id)]
     return normalize_locale(getattr(user, "language_code", None))
 
 
@@ -318,6 +321,7 @@ def build_application(token: str, db: Database, service: BotService):
             BotCommand,
             InlineKeyboardButton,
             InlineKeyboardMarkup,
+            ReplyKeyboardMarkup,
             ReplyKeyboardRemove,
             Update,
         )
@@ -336,25 +340,66 @@ def build_application(token: str, db: Database, service: BotService):
             "python-telegram-bot is not installed. Run: pip install -r requirements.txt"
         ) from exc
 
+    keyboard_button_keys = [
+        "button.new_bot",
+        "button.my_bots",
+        "button.examples",
+        "button.help",
+        "button.profile",
+        "button.health",
+        "button.language",
+        "button.status",
+        "button.ask_bot",
+        "button.edit_bot",
+        "button.revise",
+        "button.logs",
+        "button.restart",
+        "button.stop",
+        "button.delete",
+        "button.cancel",
+    ]
+    keyboard_button_labels = {
+        t(key, locale=locale)
+        for locale in ("en", "my")
+        for key in keyboard_button_keys
+    } | {"❔ Help"}
     keyboard_button_pattern = (
-        "^(🪄 New Bot|📦 My Bots|📊 Status|💬 Ask Bot|✏️ Edit Bot|♻️ Revise|🧾 Logs|🔄 Restart|🛑 Stop|"
-        "🗑️ Delete|✨ Examples|🪪 Profile|🩺 Health|❔ Help|❌ Cancel)$"
+        "^(" + "|".join(re.escape(label) for label in sorted(keyboard_button_labels, key=len, reverse=True)) + ")$"
     )
 
     remove_keyboard = ReplyKeyboardRemove()
 
-    def keyboard_for_rows(rows: list[Any]):
-        return remove_keyboard
+    def keyboard_for_rows(rows: list[Any], locale: str = "en"):
+        return main_reply_keyboard(locale)
 
     def keyboard_for_user(user_id: int):
-        return remove_keyboard
+        locale = db.get_user_locale(user_id) if user_id else None
+        return main_reply_keyboard(normalize_locale(locale))
 
     def flow_keyboard(locale: str = "en"):
         return InlineKeyboardMarkup(
             [[InlineKeyboardButton(t("button.cancel", locale=locale), callback_data="nav:cancel")]]
         )
 
-    home_keyboard = remove_keyboard
+    def main_reply_keyboard(locale: str = "en"):
+        return ReplyKeyboardMarkup(
+            [
+                [
+                    t("button.new_bot", locale=locale),
+                    t("button.my_bots", locale=locale),
+                ],
+                [
+                    t("button.examples", locale=locale),
+                    t("button.help", locale=locale),
+                ],
+                [
+                    t("button.language", locale=locale),
+                    t("button.profile", locale=locale),
+                ],
+            ],
+            resize_keyboard=True,
+            is_persistent=True,
+        )
 
     def home_menu_keyboard(locale: str = "en"):
         return InlineKeyboardMarkup(
@@ -642,8 +687,8 @@ def build_application(token: str, db: Database, service: BotService):
             update, format_result_html(text), reply_markup=reply_markup
         )
 
-    async def reply_home(message, text: str) -> None:
-        await reply_html(message, text, reply_markup=home_keyboard)
+    async def reply_home(message, text: str, locale: str = "en") -> None:
+        await reply_html(message, text, reply_markup=main_reply_keyboard(locale))
 
     async def restart_expired_flow(
         update: Update, context: ContextTypes.DEFAULT_TYPE, action: str, title: str
@@ -661,7 +706,7 @@ def build_application(token: str, db: Database, service: BotService):
         user_id = _remember_user(db, update)
         locale = locale_for_update(update)
         logger.info("Command /start: user_id=%s chat_id=%s", user_id, _chat_id(update))
-        await reply_home(update.effective_message, t("help.text", locale=locale))
+        await reply_home(update.effective_message, t("help.text", locale=locale), locale)
         await reply_html(
             update.effective_message,
             t("home.title", locale=locale),
@@ -672,7 +717,7 @@ def build_application(token: str, db: Database, service: BotService):
         user_id = _remember_user(db, update)
         locale = locale_for_update(update)
         logger.info("Command /help: user_id=%s chat_id=%s", user_id, _chat_id(update))
-        await reply_home(update.effective_message, t("help.text", locale=locale))
+        await reply_home(update.effective_message, t("help.text", locale=locale), locale)
         await reply_html(
             update.effective_message,
             t("help.menu_title", locale=locale),
@@ -734,7 +779,7 @@ def build_application(token: str, db: Database, service: BotService):
             f"<b>Visible bots</b>\n<code>{len(rows)}</code>\n\n"
             f"<b>Running in DB</b>\n<code>{running_visible}</code>\n\n"
             f"<b>Active child processes</b>\n<code>{active_count}</code>",
-            reply_markup=keyboard_for_rows(rows),
+            reply_markup=keyboard_for_rows(rows, locale),
         )
 
     async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1075,33 +1120,44 @@ def build_application(token: str, db: Database, service: BotService):
 
     async def button_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = (update.effective_message.text or "").strip()
-        if text == "📦 My Bots":
+        button_key_by_label = {
+            t(key, locale=locale): key
+            for locale in ("en", "my")
+            for key in keyboard_button_keys
+        }
+        button_key_by_label["❔ Help"] = "button.help"
+        key = button_key_by_label.get(text)
+        if key == "button.my_bots":
             await bots(update, context)
-        elif text == "📊 Status":
+        elif key == "button.status":
             await choose_bot_for_action(update, "status", tr(update, "choose.status"))
-        elif text == "💬 Ask Bot":
+        elif key == "button.ask_bot":
             await choose_bot_for_action(update, "ask", tr(update, "choose.ask"))
-        elif text == "✏️ Edit Bot":
+        elif key == "button.edit_bot":
             await choose_bot_for_action(update, "edit", tr(update, "choose.edit"))
-        elif text == "♻️ Revise":
+        elif key == "button.revise":
             await choose_bot_for_action(update, "revise", tr(update, "choose.revise"))
-        elif text == "🧾 Logs":
+        elif key == "button.logs":
             await choose_bot_for_action(update, "tail", tr(update, "choose.tail"))
-        elif text == "🔄 Restart":
+        elif key == "button.restart":
             await choose_bot_for_action(update, "restart", tr(update, "choose.restart"))
-        elif text == "🛑 Stop":
+        elif key == "button.stop":
             await choose_bot_for_action(update, "stop", tr(update, "choose.stop"))
-        elif text == "🗑️ Delete":
+        elif key == "button.delete":
             await choose_bot_for_action(update, "delete_confirm", tr(update, "choose.delete"))
-        elif text == "🪪 Profile":
+        elif key == "button.profile":
             await identity(update, context)
-        elif text == "🩺 Health":
+        elif key == "button.health":
             await health(update, context)
-        elif text == "✨ Examples":
+        elif key == "button.examples":
             await examples(update, context)
-        elif text == "❔ Help":
+        elif key == "button.help":
             await help_command(update, context)
-        elif text == "❌ Cancel":
+        elif key == "button.language":
+            await language_command(update, context)
+        elif key == "button.new_bot":
+            await newbot(update, context)
+        elif key == "button.cancel":
             await cancel(update, context)
 
     async def newbot_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1202,7 +1258,7 @@ def build_application(token: str, db: Database, service: BotService):
         if data.startswith("lang:"):
             selected_locale = normalize_locale(data.split(":", 1)[1])
             db.update_user_locale(user_id, selected_locale)
-            setattr(update, "_botmother_locale", selected_locale)
+            USER_LOCALE_CACHE[user_id] = selected_locale
             await edit_or_reply_html(
                 update,
                 t(
@@ -1211,6 +1267,12 @@ def build_application(token: str, db: Database, service: BotService):
                 ),
                 reply_markup=home_menu_keyboard(selected_locale),
             )
+            if update.effective_message is not None:
+                await reply_home(
+                    update.effective_message,
+                    t("home.title", locale=selected_locale),
+                    selected_locale,
+                )
             return
         if data == "nav:help":
             await edit_or_reply_html(

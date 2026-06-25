@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 MAX_UNEXPECTED_SIGNAL_RESTARTS = 2
 UNEXPECTED_SIGNAL_RESTART_DELAY_SECONDS = 2
+SIGNAL_EXIT_STATUS_GRACE_SECONDS = 1.0
 
 
 class RunnerError(RuntimeError):
@@ -57,6 +58,7 @@ class ProcessManager:
         self.db = db
         self.active: dict[int, ProcessRecord] = {}
         self.unexpected_signal_restarts: dict[int, int] = {}
+        self.shutting_down = False
 
     def _resolve_python_bin(self) -> str:
         configured = self.settings.python_bin
@@ -157,6 +159,7 @@ class ProcessManager:
         return env
 
     async def start_bot(self, bot_id: int) -> None:
+        self.shutting_down = False
         if bot_id in self.active:
             logger.info("Start skipped; bot already active: bot_id=%s", bot_id)
             return
@@ -252,6 +255,16 @@ class ProcessManager:
             self.db.add_log(bot_id, "system", f"Stopped process rc={return_code_text}", self.settings.log_tail_rows)
             return
         if is_signal_exit(return_code):
+            await asyncio.sleep(SIGNAL_EXIT_STATUS_GRACE_SECONDS)
+            if record.desired_stop or self.shutting_down:
+                logger.info("Child process ended by signal during manager shutdown: bot_id=%s rc=%s", bot_id, return_code_text)
+                self.db.add_log(
+                    bot_id,
+                    "system",
+                    f"Stopped during manager shutdown rc={return_code_text}",
+                    self.settings.log_tail_rows,
+                )
+                return
             self.db.mark_stopped(bot_id, "interrupted")
             self.db.add_log(bot_id, "system", f"Process interrupted unexpectedly rc={return_code_text}", self.settings.log_tail_rows)
             logger.warning("Child process interrupted by signal: bot_id=%s rc=%s", bot_id, return_code_text)
@@ -339,6 +352,7 @@ class ProcessManager:
         await self.start_bot(bot_id)
 
     async def restore_running_bots(self) -> None:
+        self.shutting_down = False
         bots = self.db.running_bots()
         logger.info("Restoring running child bots: count=%s", len(bots))
         for bot in bots:
@@ -350,6 +364,8 @@ class ProcessManager:
                 self.db.add_log(int(bot["id"]), "system", f"Restore failed: {exc}", self.settings.log_tail_rows)
 
     async def stop_all(self, mark_stopped: bool = True) -> None:
+        if not mark_stopped:
+            self.shutting_down = True
         bot_ids = list(self.active)
         logger.info("Stopping all active child bots: count=%s mark_stopped=%s", len(bot_ids), mark_stopped)
         for bot_id in bot_ids:

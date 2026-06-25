@@ -1,22 +1,48 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 from botmother.ai import AIDecision, AIQuestion
+from botmother.db import Database
 from botmother.handlers import (
+    USER_LOCALE_CACHE,
     chunk_text,
     compact_bot_label,
     format_ai_questions,
     format_bot_list,
     format_logs,
     help_category_text,
+    locale_for_update,
     parse_ask_args,
     parse_bot_id,
     parse_tail_args,
+    _remember_user,
 )
 
 
 class FakeRow(dict):
     def __getitem__(self, key):
         return dict.__getitem__(self, key)
+
+
+class FakeUser:
+    id = 42
+    username = "alice"
+    first_name = "Alice"
+    last_name = "Tester"
+    language_code = "en"
+
+
+class FakeChat:
+    id = 100
+
+
+class SlotUpdate:
+    __slots__ = ("effective_user", "effective_chat")
+
+    def __init__(self):
+        self.effective_user = FakeUser()
+        self.effective_chat = FakeChat()
 
 
 class HandlerHelperTests(unittest.TestCase):
@@ -125,6 +151,20 @@ class HandlerHelperTests(unittest.TestCase):
         self.assertEqual(text, decision.message)
         self.assertNotIn("Suggestions:", text)
         self.assertNotIn("Follow-up", text)
+
+    def test_remember_user_uses_locale_cache_for_slot_restricted_updates(self):
+        USER_LOCALE_CACHE.clear()
+        update = SlotUpdate()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "botmother.sqlite3")
+            db.initialize()
+            _remember_user(db, update)
+            db.update_user_locale(FakeUser.id, "my")
+
+            user_id = _remember_user(db, update)
+
+        self.assertEqual(user_id, FakeUser.id)
+        self.assertEqual(locale_for_update(update), "my")
 
 
 if __name__ == "__main__":

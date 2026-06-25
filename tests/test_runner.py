@@ -6,7 +6,13 @@ from unittest.mock import patch
 
 from botmother.config import Settings
 from botmother.db import Database
-from botmother.runner import MAX_UNEXPECTED_SIGNAL_RESTARTS, ProcessManager, format_return_code, is_signal_exit
+from botmother.runner import (
+    MAX_UNEXPECTED_SIGNAL_RESTARTS,
+    ProcessManager,
+    ProcessRecord,
+    format_return_code,
+    is_signal_exit,
+)
 
 
 def make_settings(tmp: str) -> Settings:
@@ -21,6 +27,28 @@ def make_settings(tmp: str) -> Settings:
         bwrap_bin="bwrap",
         require_bwrap=True,
     )
+
+
+class FakeSignalProcess:
+    pid = 1234
+    returncode = -2
+
+    async def wait(self) -> int:
+        return -2
+
+
+def create_running_bot(db: Database, settings: Settings) -> int:
+    db.upsert_user(1, "owner", None, None)
+    bot_id = db.create_bot(
+        1,
+        100,
+        "Echo",
+        "make echo",
+        "12345:abcdefghijklmnopqrstuvwxyzABCDE",
+        settings.workdir / "1",
+    )
+    db.mark_started(bot_id, 1234)
+    return bot_id
 
 
 class RunnerTests(unittest.TestCase):
@@ -40,15 +68,7 @@ class RunnerTests(unittest.TestCase):
             settings = make_settings(tmp)
             db = Database(settings.db_path)
             db.initialize()
-            db.upsert_user(1, "owner", None, None)
-            bot_id = db.create_bot(
-                1,
-                100,
-                "Echo",
-                "make echo",
-                "12345:abcdefghijklmnopqrstuvwxyzABCDE",
-                settings.workdir / "1",
-            )
+            bot_id = create_running_bot(db, settings)
             manager = ProcessManager(settings, db)
             started = []
 
@@ -68,6 +88,46 @@ class RunnerTests(unittest.TestCase):
                 asyncio.run(manager._restart_after_unexpected_signal(bot_id, "-2 (SIGINT)"))
 
             self.assertEqual(started, [bot_id])
+
+    def test_signal_exit_during_manager_shutdown_keeps_bot_running_for_restore(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = make_settings(tmp)
+            db = Database(settings.db_path)
+            db.initialize()
+            bot_id = create_running_bot(db, settings)
+            manager = ProcessManager(settings, db)
+            record = ProcessRecord(process=FakeSignalProcess())
+            manager.active[bot_id] = record
+            manager.shutting_down = True
+
+            with patch("botmother.runner.SIGNAL_EXIT_STATUS_GRACE_SECONDS", 0):
+                asyncio.run(manager._watch_process(bot_id, record))
+
+            self.assertEqual(db.get_bot(bot_id)["status"], "running")
+            self.assertNotIn(bot_id, manager.active)
+            self.assertTrue(any("manager shutdown" in row["line"] for row in db.get_logs(bot_id, 10)))
+
+    def test_signal_exit_outside_shutdown_marks_interrupted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = make_settings(tmp)
+            db = Database(settings.db_path)
+            db.initialize()
+            bot_id = create_running_bot(db, settings)
+            manager = ProcessManager(settings, db)
+            record = ProcessRecord(process=FakeSignalProcess())
+            manager.active[bot_id] = record
+            restarted = []
+
+            async def fake_restart_after_unexpected_signal(bot_id: int, return_code_text: str) -> None:
+                restarted.append((bot_id, return_code_text))
+
+            manager._restart_after_unexpected_signal = fake_restart_after_unexpected_signal
+
+            with patch("botmother.runner.SIGNAL_EXIT_STATUS_GRACE_SECONDS", 0):
+                asyncio.run(manager._watch_process(bot_id, record))
+
+            self.assertEqual(db.get_bot(bot_id)["status"], "interrupted")
+            self.assertEqual(restarted, [(bot_id, "-2 (SIGINT)")])
 
     def test_sandbox_command_does_not_include_token(self):
         with tempfile.TemporaryDirectory() as tmp:
