@@ -53,6 +53,20 @@ EXAMPLES_TEXT = t("examples.text")
 
 USER_LOCALE_CACHE: dict[int, str] = {}
 
+BOT_TEMPLATE_PROMPTS = {
+    "shop": "Mode: e-commerce shop bot. Include product catalog, cart, checkout flow, payment/contact instructions, order storage, and admin order notifications/tools when details are provided.",
+    "booking": "Mode: booking bot. Include service selection, date/time collection, customer contact details, booking storage, admin review, and confirmation/cancel flows.",
+    "support": "Mode: support/helpdesk bot. Include ticket creation, categories, status tracking, admin replies, FAQ/help, and user-friendly escalation flow.",
+    "quiz": "Mode: quiz bot. Include question flow, scoring, leaderboard, admin question management when useful, persistence, and replay/help controls.",
+    "channel": "Mode: channel assistant bot. Include drafting, templates, subscriber/admin controls, broadcast confirmation, and safe preview flows.",
+    "other": "Mode: custom bot. Follow the user's prompt and apply sensible complete-bot defaults.",
+}
+
+
+def apply_bot_template(prompt: str, template: str | None) -> str:
+    mode = template if template in BOT_TEMPLATE_PROMPTS else "other"
+    return f"{BOT_TEMPLATE_PROMPTS[mode]}\n\nUser request:\n{prompt.strip()}"
+
 
 def parse_bot_id(args: list[str]) -> int | None:
     if not args:
@@ -356,6 +370,7 @@ def build_application(token: str, db: Database, service: BotService):
         "button.restart",
         "button.stop",
         "button.delete",
+        "button.auto_fix",
         "button.cancel",
     ]
     keyboard_button_labels = {
@@ -393,6 +408,25 @@ def build_application(token: str, db: Database, service: BotService):
                         t("button.cancel", locale=locale), callback_data="nav:cancel"
                     ),
                 ]
+            ]
+        )
+
+    def template_keyboard(locale: str = "en"):
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(t("template.shop", locale=locale), callback_data="template:shop"),
+                    InlineKeyboardButton(t("template.booking", locale=locale), callback_data="template:booking"),
+                ],
+                [
+                    InlineKeyboardButton(t("template.support", locale=locale), callback_data="template:support"),
+                    InlineKeyboardButton(t("template.quiz", locale=locale), callback_data="template:quiz"),
+                ],
+                [
+                    InlineKeyboardButton(t("template.channel", locale=locale), callback_data="template:channel"),
+                    InlineKeyboardButton(t("template.other", locale=locale), callback_data="template:other"),
+                ],
+                [InlineKeyboardButton(t("button.cancel", locale=locale), callback_data="nav:cancel")],
             ]
         )
 
@@ -583,6 +617,10 @@ def build_application(token: str, db: Database, service: BotService):
                 [
                     InlineKeyboardButton(t("button.status", locale=locale), callback_data=f"status:{bot_id}"),
                     InlineKeyboardButton(t("button.logs", locale=locale), callback_data=f"tail:{bot_id}"),
+                ],
+                [
+                    InlineKeyboardButton(t("button.validation", locale=locale), callback_data=f"validation:{bot_id}"),
+                    InlineKeyboardButton(t("button.auto_fix", locale=locale), callback_data=f"autofix:{bot_id}"),
                 ],
                 [
                     InlineKeyboardButton(t("button.ask", locale=locale), callback_data=f"ask:{bot_id}"),
@@ -817,24 +855,58 @@ def build_application(token: str, db: Database, service: BotService):
         context.user_data["newbot_user_context"] = user_context_for_ai(update)
         await reply_html(
             update.effective_message,
-            tr(update, "newbot.start"),
+            tr(update, "newbot.choose_template"),
+            reply_markup=template_keyboard(locale_for_update(update)),
+        )
+        return NEW_PROMPT
+
+    async def newbot_template(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        query = update.callback_query
+        if query is not None:
+            await query.answer()
+        _remember_user(db, update)
+        template = (query.data if query else "template:other").split(":", 1)[1]
+        if template not in BOT_TEMPLATE_PROMPTS:
+            template = "other"
+        context.user_data["newbot_template"] = template
+        await edit_or_reply_html(
+            update,
+            tr(update, f"newbot.template_{template}"),
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton(tr(update, "button.examples"), callback_data="nav:examples")]]
+                [
+                    [
+                        InlineKeyboardButton(
+                            tr(update, "button.examples"), callback_data="nav:examples"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            tr(update, "button.cancel"), callback_data="nav:cancel"
+                        )
+                    ],
+                ]
             ),
         )
         return NEW_PROMPT
 
     async def newbot_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         user_id = _remember_user(db, update)
-        prompt = (update.effective_message.text or "").strip()
-        if not prompt:
+        raw_prompt = (update.effective_message.text or "").strip()
+        if not raw_prompt:
             await reply_html(
                 update.effective_message,
                 tr(update, "newbot.empty_prompt"),
                 reply_markup=flow_keyboard(locale_for_update(update)),
             )
             return NEW_PROMPT
-        logger.info("Received newbot prompt: user_id=%s chars=%s", user_id, len(prompt))
+        template = str(context.user_data.get("newbot_template", "other"))
+        prompt = apply_bot_template(raw_prompt, template)
+        logger.info(
+            "Received newbot prompt: user_id=%s template=%s chars=%s",
+            user_id,
+            template,
+            len(raw_prompt),
+        )
         context.user_data["newbot_prompt"] = prompt
         context.user_data["newbot_answers"] = []
         context.user_data.pop("newbot_decision", None)
@@ -938,21 +1010,8 @@ def build_application(token: str, db: Database, service: BotService):
         context.user_data["newbot_user_context"] = user_context
         await edit_or_reply_html(
             update,
-            tr(update, "newbot.reprompt"),
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            tr(update, "button.examples"), callback_data="nav:examples"
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            tr(update, "button.cancel"), callback_data="nav:cancel"
-                        )
-                    ],
-                ]
-            ),
+            tr(update, "newbot.choose_template"),
+            reply_markup=template_keyboard(locale_for_update(update)),
         )
         return NEW_PROMPT
 
@@ -1033,9 +1092,10 @@ def build_application(token: str, db: Database, service: BotService):
         if row is None:
             await reply_html(update.effective_message, bot_not_found_text(update))
             return
+        dashboard = service.bot_dashboard(user_id, bot_id)
         await reply_html(
             update.effective_message,
-            format_bot_status(row),
+            format_result_html(dashboard.message),
             reply_markup=bot_actions_keyboard(bot_id, locale_for_update(update)),
         )
 
@@ -1224,10 +1284,8 @@ def build_application(token: str, db: Database, service: BotService):
         context.user_data["newbot_user_context"] = user_context_for_ai(update)
         await edit_or_reply_html(
             update,
-            tr(update, "newbot.start"),
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton(tr(update, "button.examples"), callback_data="nav:examples")]]
-            ),
+            tr(update, "newbot.choose_template"),
+            reply_markup=template_keyboard(locale_for_update(update)),
         )
         return NEW_PROMPT
 
@@ -1395,6 +1453,7 @@ def build_application(token: str, db: Database, service: BotService):
                 "tail": tr(update, "choose.tail"),
                 "restart": tr(update, "choose.restart"),
                 "stop": tr(update, "choose.stop"),
+                "autofix": tr(update, "choose.autofix"),
                 "delete_confirm": tr(update, "choose.delete"),
             }
             await choose_bot_for_action(
@@ -1415,23 +1474,49 @@ def build_application(token: str, db: Database, service: BotService):
             return
 
         if action == "status":
-            row = service.get_accessible_bot(user_id, bot_id)
+            dashboard = service.bot_dashboard(user_id, bot_id)
             await edit_or_reply_html(
                 update,
-                format_bot_status(row),
+                format_result_html(dashboard.message),
                 reply_markup=bot_actions_keyboard(bot_id, locale_for_update(update)),
             )
         elif action == "tail":
             await edit_or_reply_html(
                 update,
                 f"<pre>{escape(format_logs(db.get_logs(bot_id, 50), locale_for_update(update)))}</pre>",
+                reply_markup=bot_actions_keyboard(bot_id, locale_for_update(update)),
+            )
+        elif action == "validation":
+            result = service.validation_report(user_id, bot_id)
+            await edit_or_reply_result(
+                update,
+                result.message,
+                reply_markup=bot_actions_keyboard(bot_id, locale_for_update(update)),
+            )
+        elif action == "autofix":
+            await edit_or_reply_html(update, tr(update, "autofix.running"))
+            result = await service.auto_fix_bot(
+                user_id, bot_id, user_context=user_context_for_ai(update)
+            )
+            await edit_or_reply_result(
+                update,
+                result.message,
+                reply_markup=bot_actions_keyboard(bot_id, locale_for_update(update)),
             )
         elif action == "restart":
             result = await service.restart_bot(user_id, bot_id)
-            await edit_or_reply_result(update, result.message)
+            await edit_or_reply_result(
+                update,
+                result.message,
+                reply_markup=bot_actions_keyboard(bot_id, locale_for_update(update)),
+            )
         elif action == "stop":
             result = await service.stop_bot(user_id, bot_id)
-            await edit_or_reply_result(update, result.message)
+            await edit_or_reply_result(
+                update,
+                result.message,
+                reply_markup=bot_actions_keyboard(bot_id, locale_for_update(update)),
+            )
         elif action == "delete_confirm":
             row = service.get_accessible_bot(user_id, bot_id)
             title = escape(bot_title(row)) if row is not None else "this bot"
@@ -1516,6 +1601,37 @@ def build_application(token: str, db: Database, service: BotService):
             update.effective_message,
             result.message,
             reply_markup=keyboard_for_user(user_id),
+        )
+
+    async def validation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = _remember_user(db, update)
+        bot_id = parse_bot_id(context.args)
+        logger.info("Command /validate: user_id=%s bot_id=%s", user_id, bot_id)
+        if bot_id is None:
+            await choose_bot_for_action(update, "validation", tr(update, "choose.validation"))
+            return
+        result = service.validation_report(user_id, bot_id)
+        await reply_result(
+            update.effective_message,
+            result.message,
+            reply_markup=bot_actions_keyboard(bot_id, locale_for_update(update)) if result.bot_id else keyboard_for_user(user_id),
+        )
+
+    async def autofix(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = _remember_user(db, update)
+        bot_id = parse_bot_id(context.args)
+        logger.info("Command /fix: user_id=%s bot_id=%s", user_id, bot_id)
+        if bot_id is None:
+            await choose_bot_for_action(update, "autofix", tr(update, "choose.autofix"))
+            return
+        progress_message = await reply_html(update.effective_message, tr(update, "autofix.running"))
+        result = await service.auto_fix_bot(
+            user_id, bot_id, user_context=user_context_for_ai(update)
+        )
+        await edit_message_result(
+            progress_message,
+            result.message,
+            reply_markup=bot_actions_keyboard(bot_id, locale_for_update(update)) if result.bot_id else keyboard_for_user(user_id),
         )
 
     async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1788,6 +1904,8 @@ def build_application(token: str, db: Database, service: BotService):
                 BotCommand("edit", "Change a child bot with prompts"),
                 BotCommand("id", "Show your Telegram user ID"),
                 BotCommand("health", "Show manager health"),
+                BotCommand("validate", "Show generated-code validation report"),
+                BotCommand("fix", "Auto-fix a child bot from logs"),
                 BotCommand("delete", "Stop and delete a child bot"),
                 BotCommand("stop", "Stop a child bot"),
                 BotCommand("restart", "Restart a child bot"),
@@ -1846,7 +1964,10 @@ def build_application(token: str, db: Database, service: BotService):
             CallbackQueryHandler(newbot_button, pattern="^nav:newbot$"),
         ],
         states={
-            NEW_PROMPT: [MessageHandler(conversation_text, newbot_prompt)],
+            NEW_PROMPT: [
+                CallbackQueryHandler(newbot_template, pattern=r"^template:\w+$"),
+                MessageHandler(conversation_text, newbot_prompt),
+            ],
             NEW_FOLLOWUP: [
                 CallbackQueryHandler(newbot_reprompt, pattern=r"^reprompt:newbot$"),
                 MessageHandler(conversation_text, newbot_followup),
@@ -1927,6 +2048,9 @@ def build_application(token: str, db: Database, service: BotService):
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("tail", tail))
     application.add_handler(CommandHandler("logs", tail))
+    application.add_handler(CommandHandler("validate", validation))
+    application.add_handler(CommandHandler("fix", autofix))
+    application.add_handler(CommandHandler("autofix", autofix))
     application.add_handler(CommandHandler("source", source))
     application.add_handler(CommandHandler("stop", stop))
     application.add_handler(CommandHandler("restart", restart))

@@ -11,7 +11,11 @@ from .ai import (
     AIReadinessDecision,
     GeminiCodeGenerator,
 )
-from .code_tools import extract_python_code, validate_generated_code
+from .code_tools import (
+    extract_python_code,
+    validate_generated_code,
+    validate_generated_code_report,
+)
 from .config import Settings
 from .db import Database
 from .runner import ProcessManager
@@ -36,6 +40,13 @@ class SourceResult:
 
 @dataclass(frozen=True)
 class AskResult:
+    ok: bool
+    message: str
+    bot_id: int | None = None
+
+
+@dataclass(frozen=True)
+class DashboardResult:
     ok: bool
     message: str
     bot_id: int | None = None
@@ -573,6 +584,51 @@ class BotService:
             return None
         return self.db.get_bot(bot_id)
 
+    def bot_dashboard(self, user_id: int, bot_id: int) -> DashboardResult:
+        if not self.can_manage(user_id, bot_id):
+            return DashboardResult(False, "🔎 Bot not found, or you do not have access.", bot_id)
+        bot = self.db.get_bot(bot_id)
+        if bot is None:
+            return DashboardResult(False, "🔎 Bot not found, or you do not have access.", bot_id)
+        revision = self.db.latest_revision(bot_id)
+        env_names = sorted(self.db.get_bot_env_vars(bot_id))
+        recent_logs = self.db.get_logs(bot_id, 5)
+        error_lines = [
+            str(row["line"]).replace("\n", " ")
+            for row in recent_logs
+            if str(row["stream"]).lower() in {"stderr", "system"}
+        ]
+        validation = self._validation_report_text(revision["code"] if revision is not None else "")
+        username = f"@{bot['bot_username']}" if bot["bot_username"] else "Not available yet"
+        pid = str(bot["pid"] or "none")
+        process_state = "active" if bot_id in self.runner.active else "not active"
+        message = (
+            f"📦 {bot['name']}\n\n"
+            f"Bot username\n{username}\n\n"
+            f"Status\n{bot['status']}\n\n"
+            f"Process\n{process_state}, pid {pid}\n\n"
+            f"Owner\n{bot['owner_username'] or bot['owner_first_name'] or bot['owner_user_id']}\n\n"
+            f"Revisions\n{self.db.count_revisions(bot_id)}\n\n"
+            f"Extra env vars\n{', '.join(env_names) if env_names else 'None'}\n\n"
+            f"Validation\n{validation}\n\n"
+            f"Latest issue\n{error_lines[-1] if error_lines else 'No recent errors.'}"
+        )
+        return DashboardResult(True, message, bot_id)
+
+    def validation_report(self, user_id: int, bot_id: int) -> OperationResult:
+        if not self.can_manage(user_id, bot_id):
+            return OperationResult(False, "🔎 Bot not found, or you do not have access.", bot_id)
+        revision = self.db.latest_revision(bot_id)
+        if revision is None or not revision["code"]:
+            return OperationResult(False, "This bot has no saved source to validate.", bot_id)
+        bot = self.db.get_bot(bot_id)
+        name = bot["name"] if bot is not None else "Bot"
+        return OperationResult(
+            True,
+            f"🧪 Validation report for {name}\n\n{self._validation_report_text(revision['code'])}",
+            bot_id,
+        )
+
     def get_source(self, user_id: int, bot_id: int) -> SourceResult:
         if not self.can_manage(user_id, bot_id):
             logger.info("Denied source: user_id=%s bot_id=%s", user_id, bot_id)
@@ -614,6 +670,37 @@ class BotService:
             return AskResult(False, f"Could not answer about this bot: {exc}", bot_id)
         return AskResult(True, answer, bot_id)
 
+    async def auto_fix_bot(
+        self, user_id: int, bot_id: int, user_context: str = ""
+    ) -> OperationResult:
+        if not self.can_manage(user_id, bot_id):
+            logger.info("Denied auto-fix: user_id=%s bot_id=%s", user_id, bot_id)
+            return OperationResult(False, "🔎 Bot not found, or you do not have access.", bot_id)
+
+        bot = self.db.get_bot(bot_id)
+        revision = self.db.latest_revision(bot_id)
+        if bot is None or revision is None or not revision["code"]:
+            return OperationResult(False, "This bot has no saved source to auto-fix.", bot_id)
+
+        prompt = self._auto_fix_prompt(bot_id, bot, revision)
+        logger.info("Auto-fix planning: bot_id=%s user_id=%s prompt_chars=%s", bot_id, user_id, len(prompt))
+        decision = self.generator.decide_edit(
+            revision["code"],
+            prompt,
+            [],
+            force_code=True,
+            user_context=user_context,
+        )
+        if decision.type != "code" or not decision.code:
+            return OperationResult(False, "🧠 Auto Fix could not produce a repair yet.", bot_id)
+        return await self.edit_bot_from_decision(
+            user_id,
+            bot_id,
+            "Auto Fix from logs, validation report, and current bot context",
+            decision,
+            user_context=user_context,
+        )
+
     def _set_workdir(self, bot_id: int, bot_dir: Path) -> None:
         self.db.update_bot_workdir(bot_id, bot_dir)
 
@@ -632,12 +719,16 @@ class BotService:
             f"Bot ID: {bot['id']}",
             f"Name: {bot['name']}",
             f"Status: {bot['status']}",
+            f"Process active in manager: {'yes' if bot_id in self.runner.active else 'no'}",
+            f"PID: {bot['pid'] or 'none'}",
             f"Owner: {bot['owner_username'] or bot['owner_first_name'] or 'unknown'}",
+            f"Revision count: {self.db.count_revisions(bot_id)}",
             f"Original prompt:\n{bot['prompt']}",
             "Configured child env var names: "
             + (", ".join(env_names) if env_names else "none"),
             f"Latest revision validation: {revision['validation_status']}",
             f"Latest revision validation error: {revision['validation_error'] or 'none'}",
+            "Current validation report:\n" + self._validation_report_text(revision["code"]),
             "Recent logs:\n"
             + ("\n".join(log_lines) if log_lines else "No recent logs."),
             f"Latest source:\n{revision['code']}",
@@ -653,6 +744,46 @@ class BotService:
             if value and len(value) >= 4:
                 redacted = redacted.replace(value, f"[{name} redacted]")
         return redacted
+
+    def _validation_report_text(self, code: str) -> str:
+        if not code.strip():
+            return "No source available."
+        rows = []
+        for check in validate_generated_code_report(code):
+            marker = "PASS" if check.ok else "FAIL"
+            detail = f" - {check.detail}" if check.detail else ""
+            rows.append(f"{marker}: {check.name}{detail}")
+        return "\n".join(rows)
+
+    def _auto_fix_prompt(self, bot_id: int, bot, revision) -> str:
+        env_names = sorted(self.db.get_bot_env_vars(bot_id))
+        logs = self.db.get_logs(bot_id, 80)
+        log_lines = [
+            f"[{row['stream']}] {str(row['line']).replace(chr(10), ' ')}"
+            for row in logs
+        ]
+        context = "\n\n".join(
+            [
+                "Auto-fix this deployed Telegram bot.",
+                "Goal: repair the concrete bug while preserving existing behavior, data model, buttons, commands, and user-facing intent.",
+                "Do not add new features unless needed to fix the bug. Keep the bot standalone and deployment-ready.",
+                f"Bot name: {bot['name']}",
+                f"Status: {bot['status']}",
+                f"Process active in manager: {'yes' if bot_id in self.runner.active else 'no'}",
+                f"Original prompt:\n{bot['prompt']}",
+                "Configured child env var names: "
+                + (", ".join(env_names) if env_names else "none"),
+                f"Latest revision validation status: {revision['validation_status']}",
+                f"Latest revision validation error: {revision['validation_error'] or 'none'}",
+                "Current validation report:\n" + self._validation_report_text(revision["code"]),
+                "Recent logs:\n" + ("\n".join(log_lines) if log_lines else "No recent logs."),
+            ]
+        )
+        return self._redact_context(
+            context,
+            str(bot["token"]),
+            self.db.get_bot_env_vars(bot_id),
+        )
 
     def _refine_code_for_deploy(
         self,

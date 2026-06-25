@@ -183,6 +183,14 @@ Negative child process return codes mean Linux signals. For example, `rc=-2` is 
 
 Tap `✏️ Edit Bot`, choose the bot, then describe the change you want in normal language, for example `add a help menu with buttons` or `make the bot remember birthdays`. BotMother lets the AI ask follow-up questions, edits the existing generated Python internally, validates the new revision, saves it, and restarts the child bot when the edit is valid.
 
+## Templates, Dashboard, And Auto Fix
+
+New Bot starts with a mode picker: Shop, Booking, Support, Quiz, Channel, or Other. The selected mode is added as hidden planning context, so users still describe the bot naturally while Gemini gets a stronger product starting point.
+
+Each child bot page now acts as a dashboard with username, status, process state, PID, owner, revision count, env var names, validation summary, and the latest issue from recent logs. The `🧪 Validation` action shows the syntax, security, static AST, Telegram hook, and mypy layers.
+
+Use `🛠️ Auto Fix` or `/fix <id>` when a bot has an error. BotMother sends the latest source, original prompt, validation report, env names, status, and recent logs to the AI as a targeted edit request, then validates and restarts the bot through the normal edit pipeline.
+
 ## AI Follow-Ups
 
 For New Bot and Edit Bot, BotMother asks Gemini for a strict JSON decision. The decision type is either `questions` or `code`. BotMother includes useful Telegram user/chat context, such as user ID, username, names, language code, chat ID, and chat type, so Gemini can make better defaults without asking for basic identity details. When the AI returns questions, BotMother sends Gemini's user-facing message directly, then sends the user's answer back into the next AI turn. The structured question fields are internal only, so BotMother does not add visible question numbers, suggestion labels, or follow-up counters. To avoid endless loops, BotMother allows up to 5 internal follow-up rounds, then forces a final code decision or ends the flow if the AI still cannot proceed safely.

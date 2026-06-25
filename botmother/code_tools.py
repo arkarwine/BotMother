@@ -56,6 +56,13 @@ class ValidationResult:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class ValidationCheck:
+    name: str
+    ok: bool
+    detail: str = ""
+
+
 @dataclass
 class StaticScope:
     parent: "StaticScope | None" = None
@@ -504,31 +511,70 @@ def _clean_mypy_output(output: str, limit: int = 5) -> str:
 
 
 def validate_generated_code(code: str) -> ValidationResult:
+    report = validate_generated_code_report(code)
+    failed = next((check for check in report if not check.ok), None)
+    if failed is None:
+        return ValidationResult(True)
+    return ValidationResult(False, failed.detail or f"{failed.name} failed.")
+
+
+def validate_generated_code_report(code: str) -> list[ValidationCheck]:
     if not code.strip():
-        return ValidationResult(False, "Generated code is empty.")
+        return [ValidationCheck("Source", False, "Generated code is empty.")]
+
+    checks: list[ValidationCheck] = []
     try:
         tree = ast.parse(code)
     except SyntaxError as exc:
-        return ValidationResult(False, f"Syntax error on line {exc.lineno}: {exc.msg}")
+        return [
+            ValidationCheck(
+                "Syntax",
+                False,
+                f"Syntax error on line {exc.lineno}: {exc.msg}",
+            )
+        ]
+    checks.append(ValidationCheck("Syntax", True, "ast.parse passed."))
 
     visitor = DenylistVisitor()
     visitor.visit(tree)
     if visitor.errors:
-        return ValidationResult(False, "; ".join(visitor.errors))
+        checks.append(ValidationCheck("Security", False, "; ".join(visitor.errors)))
+        return checks
+    checks.append(ValidationCheck("Security", True, "Denylist passed."))
+
     static_errors = StaticTypeVisitor().check(tree)
     if static_errors:
-        return ValidationResult(False, "; ".join(static_errors[:5]))
+        checks.append(
+            ValidationCheck("Static AST", False, "; ".join(static_errors[:5]))
+        )
+        return checks
+    checks.append(ValidationCheck("Static AST", True, "Local static checks passed."))
+
+    hook_errors = []
     if not visitor.has_global_error_handler:
-        return ValidationResult(
-            False,
-            "Missing global error handler: call application.add_error_handler(...).",
+        hook_errors.append(
+            "Missing global error handler: call application.add_error_handler(...)."
         )
     if not visitor.has_command_menu_registration:
-        return ValidationResult(
-            False,
-            "Missing bot command menu registration: call application.bot.set_my_commands(...).",
+        hook_errors.append(
+            "Missing bot command menu registration: call application.bot.set_my_commands(...)."
         )
+    if hook_errors:
+        checks.append(ValidationCheck("Telegram UX hooks", False, "; ".join(hook_errors)))
+        return checks
+    checks.append(
+        ValidationCheck(
+            "Telegram UX hooks",
+            True,
+            "Global error handler and command menu registration found.",
+        )
+    )
+
     mypy_result = run_mypy_static_check(code)
     if not mypy_result.ok:
-        return mypy_result
-    return ValidationResult(True)
+        checks.append(
+            ValidationCheck("Mypy", False, mypy_result.error or "Mypy failed.")
+        )
+        return checks
+    checks.append(ValidationCheck("Mypy", True, "Mypy passed or was unavailable."))
+    return checks

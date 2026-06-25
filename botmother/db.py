@@ -274,6 +274,14 @@ class Database:
                 (bot_id,),
             ).fetchone()
 
+    def count_revisions(self, bot_id: int) -> int:
+        with self.session() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM revisions WHERE bot_id = ?",
+                (bot_id,),
+            ).fetchone()
+            return int(row["count"] if row is not None else 0)
+
     def set_bot_env_vars(self, bot_id: int, env_vars: dict[str, str]) -> None:
         now = int(time.time())
         with self.session() as conn:

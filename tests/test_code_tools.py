@@ -2,7 +2,12 @@ import unittest
 from subprocess import CompletedProcess
 from unittest.mock import patch
 
-from botmother.code_tools import extract_python_code, run_mypy_static_check, validate_generated_code
+from botmother.code_tools import (
+    extract_python_code,
+    run_mypy_static_check,
+    validate_generated_code,
+    validate_generated_code_report,
+)
 from botmother.tokens import is_valid_telegram_token, mask_token
 
 
@@ -25,6 +30,25 @@ class CodeToolsTests(unittest.TestCase):
             "print(os.environ['BOT_TOKEN'])"
         )
         self.assertTrue(result.ok, result.error)
+
+    def test_validation_report_lists_layers(self):
+        report = validate_generated_code_report(
+            "from typing import Any\n"
+            "async def error_handler(update, context):\n"
+            "    pass\n"
+            "async def setup(application):\n"
+            "    await application.bot.set_my_commands([])\n"
+            "def main():\n"
+            "    application: Any = object()\n"
+            "    application.add_error_handler(error_handler)\n"
+        )
+
+        names = [check.name for check in report]
+
+        self.assertIn("Syntax", names)
+        self.assertIn("Security", names)
+        self.assertIn("Static AST", names)
+        self.assertIn("Telegram UX hooks", names)
 
     def test_validate_requires_global_error_handler(self):
         result = validate_generated_code("import os\nprint(os.environ['BOT_TOKEN'])")

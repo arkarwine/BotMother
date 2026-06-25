@@ -280,6 +280,45 @@ class ServiceEditTests(unittest.TestCase):
             self.assertTrue(result.ok, result.message)
             self.assertEqual(result.code, OLD_BOT_CODE)
 
+    def test_bot_dashboard_includes_validation_and_runtime_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, db, runner, _, bot_id = make_service(tmp)
+            runner.active[bot_id] = object()
+            db.add_log(bot_id, "stderr", "boom", 50)
+
+            result = service.bot_dashboard(1, bot_id)
+
+            self.assertTrue(result.ok, result.message)
+            self.assertIn("Process", result.message)
+            self.assertIn("active", result.message)
+            self.assertIn("Validation", result.message)
+            self.assertIn("PASS: Syntax", result.message)
+            self.assertIn("boom", result.message)
+
+    def test_validation_report_returns_layered_checks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _, _, _, bot_id = make_service(tmp)
+
+            result = service.validation_report(1, bot_id)
+
+            self.assertTrue(result.ok, result.message)
+            self.assertIn("Validation report", result.message)
+            self.assertIn("PASS: Syntax", result.message)
+
+    def test_auto_fix_uses_logs_validation_and_existing_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, db, runner, generator, bot_id = make_service(tmp)
+            runner.active[bot_id] = object()
+            db.add_log(bot_id, "stderr", "NameError: missing_start", 50)
+
+            result = asyncio.run(service.auto_fix_bot(1, bot_id, "Telegram user ID: 1"))
+
+            self.assertTrue(result.ok, result.message)
+            self.assertIn("NameError: missing_start", generator.edit_prompt)
+            self.assertIn("Current validation report", generator.edit_prompt)
+            self.assertIn("Auto Fix", db.latest_revision(bot_id)["prompt"])
+            self.assertEqual(generator.current_code, OLD_BOT_CODE)
+
     def test_ask_bot_uses_context_and_redacts_secrets(self):
         with tempfile.TemporaryDirectory() as tmp:
             service, db, _, generator, bot_id = make_service(tmp)

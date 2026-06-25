@@ -121,6 +121,19 @@ Rules:
 
 
 FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+EMPTY_QUESTION_MESSAGE_RE = re.compile(
+    r"\b(?:"
+    r"clarify(?:\s+\w+){0,6}\s+(?:following|questions?|details?)|"
+    r"answer(?:\s+\w+){0,6}\s+(?:following|questions?|details?)|"
+    r"(?:please\s+)?provide(?:\s+\w+){0,6}\s+(?:details?|information|answers?)|"
+    r"(?:need|needs|needed|require|requires|required)(?:\s+\w+){0,6}\s+(?:details?|information|clarification|answers?)|"
+    r"few\s+more\s+details?|"
+    r"more\s+details?|"
+    r"following\s+questions?|"
+    r"questions?\s+below"
+    r")\b",
+    re.IGNORECASE,
+)
 QUESTION_KEYS = {"id", "question", "suggestions"}
 ENV_KEYS = {"name", "value"}
 TOP_LEVEL_KEYS = {"type", "message", "questions", "code", "env"}
@@ -182,6 +195,16 @@ def _expect_str(value: Any, field: str, allow_empty: bool = False) -> str:
     if not allow_empty and not value.strip():
         raise AIResponseError(f"AI JSON field '{field}' must not be empty.")
     return value.strip() if not allow_empty else value
+
+
+def _reject_empty_question_message(message: str, questions: tuple[Any, ...]) -> None:
+    if questions:
+        return
+    if EMPTY_QUESTION_MESSAGE_RE.search(message):
+        raise AIResponseError(
+            "AI message asks the user to answer or clarify questions, but the JSON questions array is empty."
+        )
+
 
 def parse_ai_decision(text: str) -> AIDecision:
     try:
@@ -265,6 +288,7 @@ def parse_ai_decision(text: str) -> AIDecision:
         )
 
     parsed_questions = tuple(questions)
+    _reject_empty_question_message(message, parsed_questions)
 
     if decision_type == "questions":
         if not questions:
@@ -342,7 +366,7 @@ def parse_readiness_decision(text: str) -> AIReadinessDecision:
         )
     message = _expect_str(data.get("message", ""), "message", allow_empty=True).strip()
     questions = _parse_questions(data)
-
+    _reject_empty_question_message(message, questions)
 
     if decision_type == "ready":
         if questions:

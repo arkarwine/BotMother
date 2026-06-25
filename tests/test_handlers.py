@@ -6,6 +6,7 @@ from botmother.ai import AIDecision, AIQuestion
 from botmother.db import Database
 from botmother.handlers import (
     USER_LOCALE_CACHE,
+    apply_bot_template,
     chunk_text,
     compact_bot_label,
     format_ai_questions,
@@ -133,6 +134,18 @@ class HandlerHelperTests(unittest.TestCase):
     def test_chunk_text(self):
         self.assertEqual(chunk_text("abcdef", 2), ["ab", "cd", "ef"])
         self.assertEqual(chunk_text("", 2), [""])
+
+    def test_apply_bot_template_adds_selected_mode(self):
+        text = apply_bot_template("sell shoes", "shop")
+
+        self.assertIn("Mode: e-commerce shop bot", text)
+        self.assertIn("sell shoes", text)
+
+    def test_apply_bot_template_defaults_to_other(self):
+        text = apply_bot_template("custom workflow", "unknown")
+
+        self.assertIn("Mode: custom bot", text)
+        self.assertIn("custom workflow", text)
 
     def test_format_ai_questions_uses_ai_message_verbatim(self):
         decision = AIDecision(
