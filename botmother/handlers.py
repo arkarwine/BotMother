@@ -3,10 +3,12 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+import asyncio
 from html import escape
 from typing import Any
 
 from .ai import MAX_FOLLOWUP_ROUNDS, AIDecision, AIReadinessDecision
+from .credits import ACTION_ASK, ACTION_EDIT, ACTION_LABELS, ACTION_NEW_BOT, ACTION_REVISE
 from .db import Database
 from .localization import normalize_locale, t
 from .service import BotService, OperationResult
@@ -46,6 +48,7 @@ HELP_CATEGORY_TEXTS = {
     "manage": t("help.manage"),
     "ops": t("help.ops"),
     "utils": t("help.utils"),
+    "credits": t("help.credits"),
     "fallback": t("help.fallback"),
 }
 
@@ -187,7 +190,7 @@ def compact_bot_label(row: Any) -> str:
 
 
 def help_category_text(category: str, locale: str = "en") -> str:
-    if category in {"create", "manage", "ops", "utils", "fallback"}:
+    if category in {"create", "manage", "ops", "utils", "credits", "fallback"}:
         return t(f"help.{category}", locale=locale)
     return t("help.text", locale=locale)
 
@@ -336,6 +339,67 @@ def format_user_profile(update: Any, is_owner: bool) -> str:
     return "\n".join(lines).strip()
 
 
+def format_credit_overview(update: Any, service: BotService, user_id: int) -> str:
+    if not service.settings.credits_enabled:
+        return tr(update, "credits.disabled")
+    if service.is_credit_exempt(user_id):
+        return tr(update, "credits.exempt")
+    balance = service.credit_balance(user_id)
+    return tr(
+        update,
+        "credits.overview",
+        balance=str(balance if balance is not None else 0),
+        new_bot=str(service.credit_cost(ACTION_NEW_BOT)),
+        edit=str(service.credit_cost(ACTION_EDIT)),
+        ask=str(service.credit_cost(ACTION_ASK)),
+        runtime=str(service.settings.credit_runtime_seconds_per_credit // 3600),
+    )
+
+
+def format_paid_action_intro(update: Any, service: BotService, action: str, body: str) -> str:
+    if not service.settings.credits_enabled:
+        return body
+    cost = service.credit_cost(action)
+    if service.is_credit_exempt(int(update.effective_user.id)):
+        note = tr(update, "credits.exempt_line")
+    else:
+        balance = service.credit_balance(int(update.effective_user.id))
+        note = tr(
+            update,
+            "credits.cost_line",
+            cost=str(cost),
+            balance=str(balance if balance is not None else 0),
+        )
+    return body + "\n\n" + note
+
+
+def format_credit_gate(update: Any, gate: Any) -> str:
+    if getattr(gate, "ok", False):
+        return ""
+    label = ACTION_LABELS.get(getattr(gate, "action", ""), getattr(gate, "action", "Action"))
+    return tr(
+        update,
+        "credits.insufficient",
+        action=escape(label),
+        cost=str(getattr(gate, "cost", 0)),
+        balance=str(getattr(gate, "balance", 0)),
+    )
+
+
+def format_home_title(update: Any, service: BotService, user_id: int) -> str:
+    text = tr(update, "home.title")
+    if not service.settings.credits_enabled:
+        return text
+    if service.is_credit_exempt(user_id):
+        return text + "\n\n" + tr(update, "credits.exempt_line")
+    balance = service.credit_balance(user_id)
+    return text + "\n\n" + tr(
+        update,
+        "credits.home_line",
+        balance=str(balance if balance is not None else 0),
+    )
+
+
 def build_application(token: str, db: Database, service: BotService):
     try:
         from telegram import (
@@ -368,6 +432,7 @@ def build_application(token: str, db: Database, service: BotService):
         "button.help",
         "button.profile",
         "button.health",
+        "button.credits",
         "button.language",
         "button.status",
         "button.ask_bot",
@@ -452,6 +517,9 @@ def build_application(token: str, db: Database, service: BotService):
                     t("button.language", locale=locale),
                     t("button.profile", locale=locale),
                 ],
+                [
+                    t("button.credits", locale=locale),
+                ],
             ],
             resize_keyboard=True,
             is_persistent=True,
@@ -473,7 +541,22 @@ def build_application(token: str, db: Database, service: BotService):
                     InlineKeyboardButton(t("button.health", locale=locale), callback_data="nav:health"),
                 ],
                 [
+                    InlineKeyboardButton(t("button.credits", locale=locale), callback_data="nav:credits"),
                     InlineKeyboardButton(t("button.language", locale=locale), callback_data="nav:language"),
+                ],
+            ]
+        )
+
+    def credits_keyboard(locale: str = "en"):
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(t("button.new_bot", locale=locale), callback_data="nav:newbot"),
+                    InlineKeyboardButton(t("button.my_bots", locale=locale), callback_data="nav:bots"),
+                ],
+                [
+                    InlineKeyboardButton(t("button.help", locale=locale), callback_data="help:credits"),
+                    InlineKeyboardButton(t("button.home", locale=locale), callback_data="nav:home"),
                 ],
             ]
         )
@@ -492,6 +575,9 @@ def build_application(token: str, db: Database, service: BotService):
                 [
                     InlineKeyboardButton(t("button.operations", locale=locale), callback_data="help:ops"),
                     InlineKeyboardButton(t("button.utilities", locale=locale), callback_data="help:utils"),
+                ],
+                [
+                    InlineKeyboardButton(t("button.credits", locale=locale), callback_data="help:credits"),
                 ],
                 [
                     InlineKeyboardButton(t("button.language", locale=locale), callback_data="nav:language"),
@@ -549,6 +635,14 @@ def build_application(token: str, db: Database, service: BotService):
                 ],
                 [InlineKeyboardButton(t("button.language", locale=locale), callback_data="nav:language")],
                 [InlineKeyboardButton(t("button.examples", locale=locale), callback_data="nav:examples")],
+                [InlineKeyboardButton(t("button.help", locale=locale), callback_data="nav:help")],
+            ]
+        elif category == "credits":
+            rows = [
+                [
+                    InlineKeyboardButton(t("button.credits", locale=locale), callback_data="nav:credits"),
+                    InlineKeyboardButton(t("button.new_bot", locale=locale), callback_data="nav:newbot"),
+                ],
                 [InlineKeyboardButton(t("button.help", locale=locale), callback_data="nav:help")],
             ]
         elif category == "fallback":
@@ -747,12 +841,22 @@ def build_application(token: str, db: Database, service: BotService):
             update, format_result_html(text), reply_markup=reply_markup
         )
 
+    def reservation_keys() -> tuple[str, ...]:
+        return ("newbot_credit_reservation_id", "edit_credit_reservation_id")
+
+    def refund_flow_credits(context: ContextTypes.DEFAULT_TYPE, note: str) -> None:
+        for key in reservation_keys():
+            reservation_id = context.user_data.pop(key, None)
+            if reservation_id is not None:
+                service.refund_paid_action(int(reservation_id), note)
+
     async def reply_home(message, text: str, locale: str = "en") -> None:
         await reply_html(message, text, reply_markup=main_reply_keyboard(locale))
 
     async def restart_expired_flow(
         update: Update, context: ContextTypes.DEFAULT_TYPE, action: str, title: str
     ) -> int:
+        refund_flow_credits(context, "Flow expired")
         context.user_data.clear()
         await reply_html(
             update.effective_message,
@@ -769,7 +873,7 @@ def build_application(token: str, db: Database, service: BotService):
         await reply_home(update.effective_message, t("help.text", locale=locale), locale)
         await reply_html(
             update.effective_message,
-            t("home.title", locale=locale),
+            format_home_title(update, service, user_id),
             reply_markup=home_menu_keyboard(locale),
         )
 
@@ -813,8 +917,19 @@ def build_application(token: str, db: Database, service: BotService):
         logger.info("Command /id: user_id=%s chat_id=%s", user_id, chat_id)
         await reply_html(
             update.effective_message,
-            format_user_profile(update, service.is_owner(user_id)),
+            format_user_profile(update, service.is_owner(user_id))
+            + "\n\n"
+            + format_credit_overview(update, service, user_id),
             reply_markup=keyboard_for_user(user_id),
+        )
+
+    async def credits(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = _remember_user(db, update)
+        logger.info("Command /credits: user_id=%s chat_id=%s", user_id, _chat_id(update))
+        await reply_html(
+            update.effective_message,
+            format_credit_overview(update, service, user_id),
+            reply_markup=credits_keyboard(locale_for_update(update)),
         )
 
     async def health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -845,6 +960,7 @@ def build_application(token: str, db: Database, service: BotService):
     async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         user_id = _remember_user(db, update)
         logger.info("Command /cancel: user_id=%s chat_id=%s", user_id, _chat_id(update))
+        refund_flow_credits(context, "User cancelled the flow")
         context.user_data.clear()
         await edit_or_reply_html(
             update,
@@ -858,11 +974,15 @@ def build_application(token: str, db: Database, service: BotService):
     async def newbot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         user_id = _remember_user(db, update)
         logger.info("Command /newbot: user_id=%s chat_id=%s", user_id, _chat_id(update))
+        refund_flow_credits(context, "New Bot restarted")
         context.user_data.pop("newbot_prompt", None)
+        context.user_data.pop("newbot_credit_reservation_id", None)
         context.user_data["newbot_user_context"] = user_context_for_ai(update)
         await reply_html(
             update.effective_message,
-            tr(update, "newbot.choose_template"),
+            format_paid_action_intro(
+                update, service, ACTION_NEW_BOT, tr(update, "newbot.choose_template")
+            ),
             reply_markup=template_keyboard(locale_for_update(update)),
         )
         return NEW_PROMPT
@@ -917,6 +1037,18 @@ def build_application(token: str, db: Database, service: BotService):
         context.user_data["newbot_prompt"] = prompt
         context.user_data["newbot_answers"] = []
         context.user_data.pop("newbot_decision", None)
+        if "newbot_credit_reservation_id" not in context.user_data:
+            gate = service.reserve_paid_action(user_id, ACTION_NEW_BOT)
+            if not gate.ok:
+                await reply_html(
+                    update.effective_message,
+                    format_credit_gate(update, gate),
+                    reply_markup=credits_keyboard(locale_for_update(update)),
+                )
+                context.user_data.clear()
+                return ConversationHandler.END
+            if gate.reservation_id is not None:
+                context.user_data["newbot_credit_reservation_id"] = gate.reservation_id
         return await continue_newbot_planning(update, context)
 
     async def continue_newbot_planning(
@@ -929,18 +1061,23 @@ def build_application(token: str, db: Database, service: BotService):
         progress_message = await reply_html(
             update.effective_message, tr(update, "newbot.thinking")
         )
-        decision = service.plan_new_bot(
-            prompt,
-            answers,
-            force_code=force_code,
-            user_context=str(context.user_data.get("newbot_user_context", "")),
-        )
+        try:
+            decision = service.plan_new_bot(
+                prompt,
+                answers,
+                force_code=force_code,
+                user_context=str(context.user_data.get("newbot_user_context", "")),
+            )
+        except Exception:
+            refund_flow_credits(context, "New Bot planning failed")
+            raise
         if decision.needs_questions:
             if force_code:
                 await edit_message_html(
                     progress_message,
                     tr(update, "newbot.more_detail"),
                 )
+                refund_flow_credits(context, "New Bot exceeded follow-up limit")
                 context.user_data.clear()
                 return ConversationHandler.END
             context.user_data["newbot_pending_questions"] = question_texts(decision)
@@ -951,18 +1088,23 @@ def build_application(token: str, db: Database, service: BotService):
             )
             return NEW_FOLLOWUP
 
-        readiness = service.check_new_bot_readiness(
-            prompt,
-            answers,
-            decision,
-            user_context=str(context.user_data.get("newbot_user_context", "")),
-        )
+        try:
+            readiness = service.check_new_bot_readiness(
+                prompt,
+                answers,
+                decision,
+                user_context=str(context.user_data.get("newbot_user_context", "")),
+            )
+        except Exception:
+            refund_flow_credits(context, "New Bot readiness check failed")
+            raise
         if readiness.needs_questions:
             if force_code:
                 await edit_message_html(
                     progress_message,
                     tr(update, "newbot.missing_launch_detail"),
                 )
+                refund_flow_credits(context, "New Bot missing essential launch detail")
                 context.user_data.clear()
                 return ConversationHandler.END
             context.user_data["newbot_pending_questions"] = question_texts(readiness)
@@ -1013,11 +1155,14 @@ def build_application(token: str, db: Database, service: BotService):
         user_id = _remember_user(db, update)
         logger.info("Re-prompt newbot: user_id=%s", user_id)
         user_context = user_context_for_ai(update)
+        refund_flow_credits(context, "User re-prompted New Bot")
         context.user_data.clear()
         context.user_data["newbot_user_context"] = user_context
         await edit_or_reply_html(
             update,
-            tr(update, "newbot.choose_template"),
+            format_paid_action_intro(
+                update, service, ACTION_NEW_BOT, tr(update, "newbot.choose_template")
+            ),
             reply_markup=template_keyboard(locale_for_update(update)),
         )
         return NEW_PROMPT
@@ -1044,14 +1189,23 @@ def build_application(token: str, db: Database, service: BotService):
             update.effective_message,
             tr(update, "newbot.launching"),
         )
-        result = await service.create_bot_from_decision(
-            user_id,
-            _chat_id(update),
-            prompt,
-            token_text,
-            decision,
-            user_context=str(context.user_data.get("newbot_user_context", "")),
-        )
+        reservation_id = context.user_data.get("newbot_credit_reservation_id")
+        try:
+            result = await service.create_bot_from_decision(
+                user_id,
+                _chat_id(update),
+                prompt,
+                token_text,
+                decision,
+                user_context=str(context.user_data.get("newbot_user_context", "")),
+            )
+        except Exception:
+            service.refund_paid_action(reservation_id, "New Bot creation failed")
+            raise
+        if result.ok or result.bot_id is not None:
+            service.settle_paid_action(reservation_id, bot_id=result.bot_id, note="New Bot generated")
+        else:
+            service.refund_paid_action(reservation_id, "New Bot did not create a valid bot")
         logger.info(
             "Create bot result: user_id=%s ok=%s bot_id=%s",
             user_id,
@@ -1162,7 +1316,12 @@ def build_application(token: str, db: Database, service: BotService):
         context.user_data["ask_user_context"] = user_context_for_ai(update)
         await reply_html(
             update.effective_message,
-            tr(update, "ask.start_examples", title=title),
+            format_paid_action_intro(
+                update,
+                service,
+                ACTION_ASK,
+                tr(update, "ask.start_examples", title=title),
+            ),
             reply_markup=flow_keyboard(locale_for_update(update)),
         )
         return ASK_PROMPT
@@ -1269,6 +1428,8 @@ def build_application(token: str, db: Database, service: BotService):
             await choose_bot_for_action(update, "delete_confirm", tr(update, "choose.delete"))
         elif key == "button.profile":
             await identity(update, context)
+        elif key == "button.credits":
+            await credits(update, context)
         elif key == "button.health":
             await health(update, context)
         elif key == "button.examples":
@@ -1287,11 +1448,15 @@ def build_application(token: str, db: Database, service: BotService):
             await update.callback_query.answer()
         user_id = _remember_user(db, update)
         logger.info("Button New Bot: user_id=%s chat_id=%s", user_id, _chat_id(update))
+        refund_flow_credits(context, "New Bot restarted")
         context.user_data.pop("newbot_prompt", None)
+        context.user_data.pop("newbot_credit_reservation_id", None)
         context.user_data["newbot_user_context"] = user_context_for_ai(update)
         await edit_or_reply_html(
             update,
-            tr(update, "newbot.choose_template"),
+            format_paid_action_intro(
+                update, service, ACTION_NEW_BOT, tr(update, "newbot.choose_template")
+            ),
             reply_markup=template_keyboard(locale_for_update(update)),
         )
         return NEW_PROMPT
@@ -1310,7 +1475,12 @@ def build_application(token: str, db: Database, service: BotService):
         context.user_data["ask_user_context"] = user_context_for_ai(update)
         await edit_or_reply_html(
             update,
-            tr(update, "ask.start_short", title=escape(bot_title(row))),
+            format_paid_action_intro(
+                update,
+                service,
+                ACTION_ASK,
+                tr(update, "ask.start_short", title=escape(bot_title(row))),
+            ),
         )
         return ASK_PROMPT
 
@@ -1328,7 +1498,12 @@ def build_application(token: str, db: Database, service: BotService):
         context.user_data["edit_user_context"] = user_context_for_ai(update)
         await edit_or_reply_html(
             update,
-            tr(update, "edit.start_short", title=escape(bot_title(row))),
+            format_paid_action_intro(
+                update,
+                service,
+                ACTION_EDIT,
+                tr(update, "edit.start_short", title=escape(bot_title(row))),
+            ),
         )
         return EDIT_PROMPT
 
@@ -1346,7 +1521,12 @@ def build_application(token: str, db: Database, service: BotService):
         context.user_data["revise_user_context"] = user_context_for_ai(update)
         await edit_or_reply_html(
             update,
-            tr(update, "revise.start_short", title=escape(bot_title(row))),
+            format_paid_action_intro(
+                update,
+                service,
+                ACTION_REVISE,
+                tr(update, "revise.start_short", title=escape(bot_title(row))),
+            ),
         )
         return REVISE_PROMPT
 
@@ -1364,7 +1544,7 @@ def build_application(token: str, db: Database, service: BotService):
         if data == "nav:home":
             await edit_or_reply_html(
                 update,
-                tr(update, "home.title"),
+                format_home_title(update, service, user_id),
                 reply_markup=home_menu_keyboard(locale_for_update(update)),
             )
             return
@@ -1373,6 +1553,13 @@ def build_application(token: str, db: Database, service: BotService):
                 update,
                 tr(update, "language.title"),
                 reply_markup=language_keyboard(locale_for_update(update)),
+            )
+            return
+        if data == "nav:credits":
+            await edit_or_reply_html(
+                update,
+                format_credit_overview(update, service, user_id),
+                reply_markup=credits_keyboard(locale_for_update(update)),
             )
             return
         if data.startswith("lang:"):
@@ -1390,7 +1577,7 @@ def build_application(token: str, db: Database, service: BotService):
             if update.effective_message is not None:
                 await reply_home(
                     update.effective_message,
-                    t("home.title", locale=selected_locale),
+                    format_home_title(update, service, user_id),
                     selected_locale,
                 )
             return
@@ -1416,7 +1603,9 @@ def build_application(token: str, db: Database, service: BotService):
         if data == "nav:id":
             await edit_or_reply_html(
                 update,
-                format_user_profile(update, service.is_owner(user_id)),
+                format_user_profile(update, service.is_owner(user_id))
+                + "\n\n"
+                + format_credit_overview(update, service, user_id),
                 reply_markup=home_menu_keyboard(locale_for_update(update)),
             )
             return
@@ -1683,7 +1872,12 @@ def build_application(token: str, db: Database, service: BotService):
         context.user_data["revise_user_context"] = user_context_for_ai(update)
         await reply_html(
             update.effective_message,
-            tr(update, "revise.start", title=escape(bot_title(row))),
+            format_paid_action_intro(
+                update,
+                service,
+                ACTION_REVISE,
+                tr(update, "revise.start", title=escape(bot_title(row))),
+            ),
             reply_markup=flow_keyboard(locale_for_update(update)),
         )
         return REVISE_PROMPT
@@ -1753,7 +1947,12 @@ def build_application(token: str, db: Database, service: BotService):
         context.user_data["edit_user_context"] = user_context_for_ai(update)
         await reply_html(
             update.effective_message,
-            tr(update, "edit.start", title=escape(bot_title(row))),
+            format_paid_action_intro(
+                update,
+                service,
+                ACTION_EDIT,
+                tr(update, "edit.start", title=escape(bot_title(row))),
+            ),
             reply_markup=flow_keyboard(locale_for_update(update)),
         )
         return EDIT_PROMPT
@@ -1775,6 +1974,18 @@ def build_application(token: str, db: Database, service: BotService):
             return EDIT_PROMPT
         context.user_data["edit_prompt"] = prompt
         context.user_data["edit_answers"] = []
+        if "edit_credit_reservation_id" not in context.user_data:
+            gate = service.reserve_paid_action(user_id, ACTION_EDIT, bot_id=bot_id)
+            if not gate.ok:
+                await reply_html(
+                    update.effective_message,
+                    format_credit_gate(update, gate),
+                    reply_markup=credits_keyboard(locale_for_update(update)),
+                )
+                context.user_data.clear()
+                return ConversationHandler.END
+            if gate.reservation_id is not None:
+                context.user_data["edit_credit_reservation_id"] = gate.reservation_id
         return await continue_edit_planning(update, context)
 
     async def continue_edit_planning(
@@ -1792,15 +2003,20 @@ def build_application(token: str, db: Database, service: BotService):
         progress_message = await reply_html(
             update.effective_message, tr(update, "edit.thinking")
         )
-        decision = service.plan_edit_bot(
-            user_id,
-            bot_id,
-            prompt,
-            answers,
-            force_code=force_code,
-            user_context=str(context.user_data.get("edit_user_context", "")),
-        )
+        try:
+            decision = service.plan_edit_bot(
+                user_id,
+                bot_id,
+                prompt,
+                answers,
+                force_code=force_code,
+                user_context=str(context.user_data.get("edit_user_context", "")),
+            )
+        except Exception:
+            refund_flow_credits(context, "Edit planning failed")
+            raise
         if isinstance(decision, OperationResult):
+            refund_flow_credits(context, "Edit could not start")
             await edit_message_result(progress_message, decision.message)
             context.user_data.clear()
             return ConversationHandler.END
@@ -1810,6 +2026,7 @@ def build_application(token: str, db: Database, service: BotService):
                     progress_message,
                     tr(update, "edit.more_detail"),
                 )
+                refund_flow_credits(context, "Edit exceeded follow-up limit")
                 context.user_data.clear()
                 return ConversationHandler.END
             context.user_data["edit_pending_questions"] = question_texts(decision)
@@ -1824,13 +2041,22 @@ def build_application(token: str, db: Database, service: BotService):
             progress_message,
             tr(update, "edit.applying"),
         )
-        result = await service.edit_bot_from_decision(
-            user_id,
-            bot_id,
-            prompt,
-            decision,
-            user_context=str(context.user_data.get("edit_user_context", "")),
-        )
+        reservation_id = context.user_data.get("edit_credit_reservation_id")
+        try:
+            result = await service.edit_bot_from_decision(
+                user_id,
+                bot_id,
+                prompt,
+                decision,
+                user_context=str(context.user_data.get("edit_user_context", "")),
+            )
+        except Exception:
+            service.refund_paid_action(reservation_id, "Edit failed")
+            raise
+        if result.ok or "saved" in result.message.lower():
+            service.settle_paid_action(reservation_id, bot_id=bot_id, note="Edit saved")
+        else:
+            service.refund_paid_action(reservation_id, "Edit did not save")
         logger.info(
             "Edit bot result: user_id=%s bot_id=%s ok=%s", user_id, bot_id, result.ok
         )
@@ -1885,12 +2111,18 @@ def build_application(token: str, db: Database, service: BotService):
             return ConversationHandler.END
         logger.info("Re-prompt edit: user_id=%s bot_id=%s", user_id, bot_id)
         user_context = context.user_data.get("edit_user_context") or user_context_for_ai(update)
+        refund_flow_credits(context, "User re-prompted Edit")
         context.user_data.clear()
         context.user_data["edit_bot_id"] = bot_id
         context.user_data["edit_user_context"] = user_context
         await edit_or_reply_html(
             update,
-            tr(update, "edit.reprompt", title=escape(bot_title(row))),
+            format_paid_action_intro(
+                update,
+                service,
+                ACTION_EDIT,
+                tr(update, "edit.reprompt", title=escape(bot_title(row))),
+            ),
             reply_markup=flow_keyboard(locale_for_update(update)),
         )
         return EDIT_PROMPT
@@ -1903,6 +2135,7 @@ def build_application(token: str, db: Database, service: BotService):
                 BotCommand("help", "Show full guide"),
                 BotCommand("examples", "Prompt examples"),
                 BotCommand("language", "Change language"),
+                BotCommand("credits", "Show your credit balance"),
                 BotCommand("newbot", "Create and launch a child bot"),
                 BotCommand("bots", "List your child bots"),
                 BotCommand("status", "Show bot status, or list all bots"),
@@ -1920,10 +2153,31 @@ def build_application(token: str, db: Database, service: BotService):
                 BotCommand("cancel", "Cancel the active flow"),
             ]
         )
+        restoring_rows = service.db.running_bots()
         await service.runner.restore_running_bots()
+        service.db.reset_runtime_meter_for_users(
+            int(row["owner_user_id"]) for row in restoring_rows
+        )
+        if service.settings.credits_enabled:
+            async def runtime_meter() -> None:
+                while True:
+                    await asyncio.sleep(
+                        max(1, service.settings.credit_runtime_meter_interval_seconds)
+                    )
+                    try:
+                        await service.bill_runtime_once(application.bot)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception("Runtime credit billing failed")
+
+            application.bot_data["runtime_credit_task"] = asyncio.create_task(runtime_meter())
 
     async def post_shutdown(application) -> None:
         logger.info("Post-shutdown: stopping active child bots")
+        task = application.bot_data.get("runtime_credit_task")
+        if task is not None:
+            task.cancel()
         await service.runner.stop_all(mark_stopped=False)
 
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2036,6 +2290,7 @@ def build_application(token: str, db: Database, service: BotService):
     application.add_handler(CommandHandler("commands", help_command))
     application.add_handler(CommandHandler("usage", help_command))
     application.add_handler(CommandHandler("language", language_command))
+    application.add_handler(CommandHandler("credits", credits))
     application.add_handler(CommandHandler("examples", examples))
     application.add_handler(CommandHandler("id", identity))
     application.add_handler(CommandHandler("whoami", identity))

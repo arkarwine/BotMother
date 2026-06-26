@@ -88,6 +88,75 @@ class DatabaseTests(unittest.TestCase):
             )
             self.assertEqual(db.get_bot_by_token(token)["id"], new_bot_id)
 
+    def test_credit_account_grants_free_credits_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "botmother.sqlite3")
+            db.initialize()
+            db.upsert_user(1, "user", None, None)
+
+            self.assertEqual(db.credit_balance(1, 50), 50)
+            self.assertEqual(db.credit_balance(1, 50), 50)
+            ledger = db.credit_ledger_for_user(1)
+            self.assertEqual(len([row for row in ledger if row["action"] == "initial_free"]), 1)
+
+    def test_credit_reserve_settle_and_refund(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "botmother.sqlite3")
+            db.initialize()
+            db.upsert_user(1, "user", None, None)
+
+            reservation_id, balance = db.reserve_credits(1, 10, "new_bot", 50)
+            self.assertIsNotNone(reservation_id)
+            self.assertEqual(balance, 40)
+            self.assertTrue(db.settle_credit_reservation(reservation_id))
+            self.assertEqual(db.credit_balance(1, 50), 40)
+
+            reservation_id, balance = db.reserve_credits(1, 5, "edit", 50)
+            self.assertEqual(balance, 35)
+            self.assertTrue(db.refund_credit_reservation(reservation_id))
+            self.assertEqual(db.credit_balance(1, 50), 40)
+
+    def test_credit_runtime_accrual_charges_after_threshold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "botmother.sqlite3")
+            db.initialize()
+            db.upsert_user(1, "user", None, None)
+            db.credit_balance(1, 50)
+            first = db.accrue_runtime_credits(1, 1, 1000, 86400, 50)
+            self.assertEqual(first.charged, 0)
+
+            second = db.accrue_runtime_credits(1, 1, 1000 + 86400, 86400, 50)
+            self.assertEqual(second.charged, 1)
+            self.assertEqual(second.balance, 49)
+
+    def test_credit_runtime_requests_stop_when_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "botmother.sqlite3")
+            db.initialize()
+            db.upsert_user(1, "user", None, None)
+            db.set_credit_balance(1, 0, None, 50)
+            db.accrue_runtime_credits(1, 1, 1000, 86400, 50)
+
+            result = db.accrue_runtime_credits(1, 1, 1000 + 86400, 86400, 50)
+
+            self.assertTrue(result.should_stop)
+            self.assertEqual(result.balance, 0)
+
+    def test_runtime_meter_reset_preserves_accumulated_seconds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "botmother.sqlite3")
+            db.initialize()
+            db.upsert_user(1, "user", None, None)
+            db.credit_balance(1, 50)
+            db.accrue_runtime_credits(1, 1, 1000, 86400, 50)
+            db.accrue_runtime_credits(1, 1, 1600, 86400, 50)
+
+            db.reset_runtime_meter_for_users([1], now=5000)
+            result = db.accrue_runtime_credits(1, 1, 5001, 86400, 50)
+
+            self.assertEqual(result.charged, 0)
+            self.assertLess(result.due, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

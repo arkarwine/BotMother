@@ -17,6 +17,15 @@ from .code_tools import (
     validate_generated_code_report,
 )
 from .config import Settings
+from .credits import (
+    ACTION_ASK,
+    ACTION_AUTOFIX,
+    ACTION_EDIT,
+    ACTION_LABELS,
+    ACTION_NEW_BOT,
+    ACTION_REVISE,
+    CreditGateResult,
+)
 from .db import Database
 from .runner import ProcessManager
 from .tokens import is_valid_telegram_token, mask_token, redact_telegram_tokens
@@ -97,6 +106,80 @@ class BotService:
 
     def is_owner(self, user_id: int) -> bool:
         return user_id in self.settings.owner_ids
+
+    def is_credit_exempt(self, user_id: int) -> bool:
+        return user_id in self.settings.owner_ids or user_id == self.settings.mgmt_owner_id
+
+    def credit_cost(self, action: str) -> int:
+        costs = {
+            ACTION_NEW_BOT: self.settings.credit_cost_new_bot,
+            ACTION_EDIT: self.settings.credit_cost_edit,
+            ACTION_REVISE: self.settings.credit_cost_revise,
+            ACTION_AUTOFIX: self.settings.credit_cost_autofix,
+            ACTION_ASK: self.settings.credit_cost_ask,
+        }
+        return max(0, int(costs.get(action, 0)))
+
+    def credit_balance(self, user_id: int) -> int | None:
+        if not self.settings.credits_enabled or self.is_credit_exempt(user_id):
+            return None
+        return self.db.credit_balance(user_id, self.settings.credits_initial_free)
+
+    def reserve_paid_action(
+        self,
+        user_id: int,
+        action: str,
+        bot_id: int | None = None,
+        note: str | None = None,
+    ) -> CreditGateResult:
+        cost = self.credit_cost(action)
+        label = ACTION_LABELS.get(action, action)
+        if not self.settings.credits_enabled or self.is_credit_exempt(user_id) or cost <= 0:
+            return CreditGateResult(True, action, cost, exempt=True)
+        reservation_id, balance = self.db.reserve_credits(
+            user_id,
+            cost,
+            action,
+            self.settings.credits_initial_free,
+            bot_id=bot_id,
+            note=note or label,
+        )
+        if reservation_id is None:
+            return CreditGateResult(
+                False,
+                action,
+                cost,
+                balance=balance,
+                message=(
+                    f"💳 Not enough credits\n\n"
+                    f"{label} costs {cost} credits.\n"
+                    f"Your balance is {balance} credits.\n\n"
+                    "Please ask an admin to add credits."
+                ),
+            )
+        return CreditGateResult(
+            True,
+            action,
+            cost,
+            balance=balance,
+            reservation_id=reservation_id,
+        )
+
+    def settle_paid_action(
+        self, reservation_id: int | None, bot_id: int | None = None, note: str | None = None
+    ) -> None:
+        self.db.settle_credit_reservation(reservation_id, bot_id=bot_id, note=note)
+
+    def refund_paid_action(self, reservation_id: int | None, note: str | None = None) -> None:
+        self.db.refund_credit_reservation(reservation_id, note=note)
+
+    def credit_summary_for_user(self, user_id: int) -> str:
+        if not self.settings.credits_enabled:
+            return "Credits are disabled."
+        if self.is_credit_exempt(user_id):
+            return "Credit-exempt owner account."
+        balance = self.db.credit_balance(user_id, self.settings.credits_initial_free)
+        return f"Balance: {balance} credits"
 
     def can_manage(self, user_id: int, bot_id: int) -> bool:
         bot = self.db.get_bot(bot_id)
@@ -339,6 +422,11 @@ class BotService:
                 False, "🔎 Bot not found, or you do not have access."
             )
 
+        gate = self.reserve_paid_action(user_id, ACTION_REVISE, bot_id=bot_id)
+        if not gate.ok:
+            return OperationResult(False, gate.message, bot_id)
+        reservation_id = gate.reservation_id
+
         was_running = bot_id in self.runner.active
         logger.info(
             "Revising bot: bot_id=%s user_id=%s was_running=%s",
@@ -355,6 +443,7 @@ class BotService:
             bot_id, prompt, user_context=user_context
         )
         if not result.ok:
+            self.refund_paid_action(reservation_id, "Revision did not produce valid code")
             logger.warning(
                 "Bot revision rejected: bot_id=%s message=%s", bot_id, result.message
             )
@@ -371,6 +460,7 @@ class BotService:
                 f"Launch failed after revise: {exc}",
                 self.settings.log_tail_rows,
             )
+            self.settle_paid_action(reservation_id, bot_id=bot_id, note="Revision saved; launch failed")
             bot = self.db.get_bot(bot_id)
             name = bot["name"] if bot is not None else "The bot"
             return OperationResult(
@@ -380,6 +470,7 @@ class BotService:
             )
 
         logger.info("Bot revised and running: bot_id=%s user_id=%s", bot_id, user_id)
+        self.settle_paid_action(reservation_id, bot_id=bot_id, note="Revision saved")
         bot = self.db.get_bot(bot_id)
         name = bot["name"] if bot is not None else "Bot"
         return OperationResult(
@@ -659,6 +750,10 @@ class BotService:
                 False, "This bot has no saved source to answer from.", bot_id
             )
 
+        gate = self.reserve_paid_action(user_id, ACTION_ASK, bot_id=bot_id)
+        if not gate.ok:
+            return AskResult(False, gate.message, bot_id)
+        reservation_id = gate.reservation_id
         try:
             context = self._bot_question_context(bot_id, bot, revision)
             answer = self.generator.answer_bot_question(context, question)
@@ -666,8 +761,10 @@ class BotService:
                 answer, str(bot["token"]), self.db.get_bot_env_vars(bot_id)
             )
         except Exception as exc:
+            self.refund_paid_action(reservation_id, "Ask failed")
             logger.exception("Ask failed: bot_id=%s user_id=%s", bot_id, user_id)
             return AskResult(False, f"Could not answer about this bot: {exc}", bot_id)
+        self.settle_paid_action(reservation_id, bot_id=bot_id, note="Ask answered")
         return AskResult(True, answer, bot_id)
 
     async def auto_fix_bot(
@@ -682,24 +779,97 @@ class BotService:
         if bot is None or revision is None or not revision["code"]:
             return OperationResult(False, "This bot has no saved source to auto-fix.", bot_id)
 
+        gate = self.reserve_paid_action(user_id, ACTION_AUTOFIX, bot_id=bot_id)
+        if not gate.ok:
+            return OperationResult(False, gate.message, bot_id)
+        reservation_id = gate.reservation_id
         prompt = self._auto_fix_prompt(bot_id, bot, revision)
         logger.info("Auto-fix planning: bot_id=%s user_id=%s prompt_chars=%s", bot_id, user_id, len(prompt))
-        decision = self.generator.decide_edit(
-            revision["code"],
-            prompt,
-            [],
-            force_code=True,
-            user_context=user_context,
-        )
+        try:
+            decision = self.generator.decide_edit(
+                revision["code"],
+                prompt,
+                [],
+                force_code=True,
+                user_context=user_context,
+            )
+        except Exception:
+            self.refund_paid_action(reservation_id, "Auto Fix planning failed")
+            raise
         if decision.type != "code" or not decision.code:
+            self.refund_paid_action(reservation_id, "Auto Fix produced no repair")
             return OperationResult(False, "🧠 Auto Fix could not produce a repair yet.", bot_id)
-        return await self.edit_bot_from_decision(
+        result = await self.edit_bot_from_decision(
             user_id,
             bot_id,
             "Auto Fix from logs, validation report, and current bot context",
             decision,
             user_context=user_context,
         )
+        if result.ok or "saved" in result.message.lower():
+            self.settle_paid_action(reservation_id, bot_id=bot_id, note="Auto Fix saved")
+        else:
+            self.refund_paid_action(reservation_id, "Auto Fix did not save")
+        return result
+
+    async def bill_runtime_once(self, telegram_bot=None) -> list[int]:
+        if not self.settings.credits_enabled:
+            return []
+        running = self.db.running_bots()
+        by_owner: dict[int, list[int]] = {}
+        by_chat: dict[int, set[int]] = {}
+        for row in running:
+            owner_id = int(row["owner_user_id"])
+            if self.is_credit_exempt(owner_id):
+                continue
+            by_owner.setdefault(owner_id, []).append(int(row["id"]))
+            by_chat.setdefault(owner_id, set()).add(int(row["chat_id"]))
+
+        stopped: list[int] = []
+        import time
+
+        now = int(time.time())
+        for owner_id, bot_ids in by_owner.items():
+            charge = self.db.accrue_runtime_credits(
+                owner_id,
+                len(bot_ids),
+                now,
+                self.settings.credit_runtime_seconds_per_credit,
+                self.settings.credits_initial_free,
+            )
+            if charge.charged:
+                logger.info(
+                    "Runtime credits charged: user_id=%s charged=%s balance=%s due=%s",
+                    owner_id,
+                    charge.charged,
+                    charge.balance,
+                    charge.due,
+                )
+            if not charge.should_stop:
+                continue
+            logger.warning("Stopping bots for exhausted runtime credits: user_id=%s bots=%s", owner_id, bot_ids)
+            for bot_id in bot_ids:
+                await self.runner.stop_bot(bot_id)
+                self.db.add_log(
+                    bot_id,
+                    "system",
+                    "Stopped because runtime credits reached zero.",
+                    self.settings.log_tail_rows,
+                )
+                stopped.append(bot_id)
+            if telegram_bot is not None:
+                for chat_id in by_chat.get(owner_id, set()):
+                    try:
+                        await telegram_bot.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                "💳 Runtime credits reached zero.\n\n"
+                                "Your running child bots were stopped. Ask an admin to add credits, then restart them."
+                            ),
+                        )
+                    except Exception:
+                        logger.debug("Could not notify user about runtime credit stop", exc_info=True)
+        return stopped
 
     def _set_workdir(self, bot_id: int, bot_dir: Path) -> None:
         self.db.update_bot_workdir(bot_id, bot_dir)

@@ -349,6 +349,68 @@ class ServiceEditTests(unittest.TestCase):
             self.assertIn("access", result.message)
             self.assertIsNone(generator.bot_question)
 
+    def test_non_owner_paid_action_reserves_and_settles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, db, _, _, _ = make_service(tmp)
+            db.upsert_user(2, "user", None, None)
+
+            gate = service.reserve_paid_action(2, "new_bot")
+
+            self.assertTrue(gate.ok, gate.message)
+            self.assertEqual(service.credit_balance(2), 40)
+            service.settle_paid_action(gate.reservation_id)
+            self.assertEqual(service.credit_balance(2), 40)
+
+    def test_non_owner_paid_action_blocks_when_balance_low(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, db, _, _, _ = make_service(tmp)
+            db.upsert_user(2, "user", None, None)
+            db.set_credit_balance(2, 2, None, service.settings.credits_initial_free)
+
+            gate = service.reserve_paid_action(2, "new_bot")
+
+            self.assertFalse(gate.ok)
+            self.assertEqual(gate.balance, 2)
+            self.assertIn("Not enough credits", gate.message)
+
+    def test_owner_bypasses_credit_charge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _, _, _, _ = make_service(tmp)
+
+            gate = service.reserve_paid_action(1, "new_bot")
+
+            self.assertTrue(gate.ok)
+            self.assertTrue(gate.exempt)
+            self.assertIsNone(gate.reservation_id)
+
+    def test_runtime_billing_stops_bots_when_balance_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, db, runner, _, _ = make_service(tmp)
+            db.upsert_user(2, "user", None, None)
+            bot_id = db.create_bot(
+                2,
+                200,
+                "Paid bot",
+                "make paid",
+                "99999:abcdefghijklmnopqrstuvwxyzABCDE",
+                service.settings.workdir / "paid",
+            )
+            db.add_revision(bot_id, "make paid", OLD_BOT_CODE, "ok", None)
+            db.mark_started(bot_id, 123)
+            runner.active[bot_id] = object()
+            db.set_credit_balance(2, 0, None, service.settings.credits_initial_free)
+            db.accrue_runtime_credits(
+                2, 1, 1000, service.settings.credit_runtime_seconds_per_credit, 50
+            )
+
+            import unittest.mock
+
+            with unittest.mock.patch("time.time", return_value=1000 + service.settings.credit_runtime_seconds_per_credit):
+                stopped = asyncio.run(service.bill_runtime_once())
+
+            self.assertEqual(stopped, [bot_id])
+            self.assertEqual(runner.stop_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

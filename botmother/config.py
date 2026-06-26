@@ -63,6 +63,16 @@ class Settings:
     python_bin: str
     bwrap_bin: str
     require_bwrap: bool
+    credits_enabled: bool = True
+    credits_initial_free: int = 50
+    credit_cost_new_bot: int = 10
+    credit_cost_edit: int = 3
+    credit_cost_revise: int = 3
+    credit_cost_autofix: int = 3
+    credit_cost_ask: int = 1
+    credit_runtime_seconds_per_credit: int = 86400
+    credit_runtime_meter_interval_seconds: int = 300
+    mgmt_owner_id: int | None = None
     log_tail_rows: int = 2000
     log_level: str = "INFO"
     log_file: Path | None = None
@@ -81,6 +91,24 @@ class Settings:
             python_bin=os.getenv("PYTHON_BIN", "python3").strip() or "python3",
             bwrap_bin=os.getenv("BWRAP_BIN", "bwrap").strip() or "bwrap",
             require_bwrap=_bool_from_env(os.getenv("BOTMOTHER_REQUIRE_BWRAP"), True),
+            credits_enabled=_bool_from_env(os.getenv("CREDITS_ENABLED"), True),
+            credits_initial_free=int(os.getenv("CREDITS_INITIAL_FREE", "50")),
+            credit_cost_new_bot=int(os.getenv("CREDIT_COST_NEW_BOT", "10")),
+            credit_cost_edit=int(os.getenv("CREDIT_COST_EDIT", "3")),
+            credit_cost_revise=int(os.getenv("CREDIT_COST_REVISE", "3")),
+            credit_cost_autofix=int(os.getenv("CREDIT_COST_AUTOFIX", "3")),
+            credit_cost_ask=int(os.getenv("CREDIT_COST_ASK", "1")),
+            credit_runtime_seconds_per_credit=int(
+                os.getenv("CREDIT_RUNTIME_SECONDS_PER_CREDIT", "86400")
+            ),
+            credit_runtime_meter_interval_seconds=int(
+                os.getenv("CREDIT_RUNTIME_METER_INTERVAL_SECONDS", "300")
+            ),
+            mgmt_owner_id=(
+                int(os.getenv("MGMT_OWNER_ID", "").strip())
+                if os.getenv("MGMT_OWNER_ID", "").strip().isdigit()
+                else None
+            ),
             log_tail_rows=int(os.getenv("BOTMOTHER_LOG_TAIL_ROWS", "2000")),
             log_level=os.getenv("BOTMOTHER_LOG_LEVEL", "INFO").strip() or "INFO",
             log_file=_path_from_env(os.getenv("BOTMOTHER_LOG_FILE", "./data/botmother.log"), base_dir),

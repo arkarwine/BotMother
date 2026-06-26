@@ -47,6 +47,15 @@ BWRAP_BIN=bwrap
 BOTMOTHER_REQUIRE_BWRAP=true
 BOTMOTHER_LOG_LEVEL=INFO
 BOTMOTHER_LOG_FILE=./data/botmother.log
+CREDITS_ENABLED=true
+CREDITS_INITIAL_FREE=50
+CREDIT_COST_NEW_BOT=10
+CREDIT_COST_EDIT=3
+CREDIT_COST_REVISE=3
+CREDIT_COST_AUTOFIX=3
+CREDIT_COST_ASK=1
+CREDIT_RUNTIME_SECONDS_PER_CREDIT=86400
+CREDIT_RUNTIME_METER_INTERVAL_SECONDS=300
 ```
 
 For Ubuntu deployment, the simplest setting is the absolute venv interpreter path:
@@ -72,6 +81,7 @@ Inline actions:
 - `🧾 Logs` - choose a bot and view recent stdout/stderr.
 - `🔄 Restart`, `🛑 Stop`, `🗑️ Delete` - choose a bot, then run the operation.
 - `✨ Examples`, `🪪 Profile`, `🩺 Health`, `🌐 Language`, `📚 Help`, `❌ Cancel` - open examples, full Telegram profile/chat info, health, language settings, category help, or leave the current flow.
+- `💳 Credits` - show the user’s balance, paid action costs, and runtime pricing.
 
 The Help menu opens category screens with inline buttons for Create, Manage, Operations, Utilities, and command fallbacks. Bot-specific screens include action buttons only when they are useful.
 
@@ -81,6 +91,7 @@ Typed commands remain available as a fallback and for power users:
 - `/help`, `/commands`, `/usage` - show the category help menu.
 - `/examples` - show copy-ready bot prompt examples.
 - `/language` - choose English or Myanmar for BotMother menus and messages.
+- `/credits` - show credit balance and costs.
 - `/newbot` - create and launch a child bot.
 - `/bots` - list your bots. Owners see all bots.
 - `/status [id]` - show one child bot status, or open the bot list when no id is given.
@@ -155,6 +166,24 @@ This is intentionally a testing-mode builder. Child tokens are stored plaintext 
 
 The AST denylist is not a complete security boundary. Bubblewrap is the real isolation layer in this version.
 
+## Credits
+
+BotMother includes a SQLite-backed credit system for AI-heavy actions and child bot runtime.
+
+- New users receive `CREDITS_INITIAL_FREE` credits once, default `50`.
+- Owners in `OWNER_IDS` and `MGMT_OWNER_ID` are credit-exempt.
+- Paid actions reserve credits before AI work starts and refund automatically if no useful bot/artifact/answer is produced.
+- Defaults: New Bot `10`, Edit/Revise/Auto Fix `3`, Ask Bot `1`.
+- Runtime is metered by accumulated bot-hours. By default, `86400` runtime seconds costs `1` credit, so two bots running 12 hours each cost one credit.
+- If runtime credits run out, BotMother stops that user’s running child bots, logs the reason, and sends a Telegram notice.
+
+Credit administration lives in the management bot:
+
+- `/credits` - credit dashboard.
+- `/usercredits <user_id>` - user balance and recent ledger.
+- `/grantcredits <user_id> <amount> [note]` - add credits.
+- `/setcredits <user_id> <amount> [note]` - owner-only absolute correction.
+
 ## Run Tests
 
 ```bash
@@ -200,3 +229,71 @@ After the normal `/newbot` questions, BotMother runs a separate readiness check 
 Before saving and launching generated code, BotMother runs bounded AI refinement layers. Each layer must return raw standalone Python. BotMother validates each candidate with syntax, denylist, static AST, required Telegram UX hooks, and `mypy` checks, then keeps the last valid version, so a bad refinement pass cannot overwrite a deployable previous pass.
 
 Planner JSON repair is also bounded. If Gemini returns invalid JSON or tries to set reserved runtime env vars such as `BOT_TOKEN`, BotMother sends the validation error back to Gemini for up to 2 repair attempts, then falls back to asking the user to restate the request.
+
+---
+
+## Management Bot
+
+`mgmtbot` is a separate B2B admin Telegram bot that shares BotMother's SQLite database (read-only for BotMother tables) and adds its own access-control and broadcast tables.
+
+### Setup
+
+Create a second bot in `@BotFather` for the management bot, then add to `.env`:
+
+```env
+MGMT_BOT_TOKEN=123456:mgmt-token-from-botfather
+MGMT_OWNER_ID=123456789
+MGMT_LOG_LEVEL=INFO
+MGMT_LOG_FILE=./data/mgmtbot.log
+```
+
+Start alongside BotMother:
+
+```bash
+python -m mgmtbot
+```
+
+### Access Tiers
+
+| Tier | How set | What they can do |
+|---|---|---|
+| **Owner** | `MGMT_OWNER_ID` env var | Everything; add/remove admins and B2B users |
+| **Admin** | `/addadmin <user_id>` at runtime | Dashboard, stats, all bots/logs, all broadcasts |
+| **B2B** | `/addb2b <user_id>` at runtime | Their own bots/logs, broadcast to their own bot chats |
+
+Unauthorized users see an "Access Denied" screen with no further information.
+
+### Management Bot Commands
+
+- `/start` — Home menu with persistent reply keyboard + inline buttons
+- `/dashboard` — System overview card (users, bots, running/crashed breakdown, health bar)
+- `/stats` — Full statistics with per-status breakdown
+- `/bots` — Paginated child bot list with status badges; tap for detail view
+- `/logs [id]` — View recent stdout/stderr for a child bot; opens a picker if no ID
+- `/users` — Total user count + recent user list
+- `/credits` — Credit dashboard and recent ledger activity
+- `/usercredits <user_id>` — One user’s balance and credit transactions
+- `/grantcredits <user_id> <amount> [note]` — Add credits manually
+- `/setcredits <user_id> <amount> [note]` — Owner-only absolute balance correction
+- `/broadcast` — Start guided broadcast wizard (target → compose → preview → confirm)
+- `/history` — Past broadcast results (sent / failed / total)
+- `/admins` — View admin and B2B user list
+- `/addadmin <user_id> [username]` — Grant admin role (admin only)
+- `/addb2b <user_id> [username]` — Grant B2B role (admin only)
+- `/removeadmin <user_id>` — Revoke access (admin only)
+- `/cancel` — Cancel active flow
+
+### Broadcasting
+
+Broadcasts are sent through the **BotMother mother bot token**, so recipients see the message from the familiar BotMother bot.
+
+Target groups:
+- **All Users** — every user who has ever chatted with BotMother
+- **All Chats** — every distinct chat ID across all bots (includes groups)
+- **Bot Owners** — users who own at least one active bot
+- **Custom List** — comma-separated Telegram chat IDs entered inline
+
+B2B users can only broadcast to the chat IDs associated with their own bots.
+
+Broadcasts support plain text, photo + caption, and document + caption.
+Rate-limited to 25 messages/second to stay within Telegram limits.

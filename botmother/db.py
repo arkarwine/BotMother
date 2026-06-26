@@ -68,9 +68,56 @@ CREATE TABLE IF NOT EXISTS bot_env_vars (
     FOREIGN KEY(bot_id) REFERENCES bots(id)
 );
 
+CREATE TABLE IF NOT EXISTS credit_accounts (
+    user_id INTEGER PRIMARY KEY,
+    balance INTEGER NOT NULL DEFAULT 0,
+    free_grant_issued INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY(user_id) REFERENCES users(user_id)
+);
+
+CREATE TABLE IF NOT EXISTS credit_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    amount INTEGER NOT NULL,
+    balance_after INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    action TEXT NOT NULL,
+    reservation_id INTEGER,
+    bot_id INTEGER,
+    note TEXT,
+    actor_user_id INTEGER,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY(user_id) REFERENCES users(user_id)
+);
+
+CREATE TABLE IF NOT EXISTS credit_reservations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    amount INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    status TEXT NOT NULL,
+    bot_id INTEGER,
+    note TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY(user_id) REFERENCES users(user_id)
+);
+
+CREATE TABLE IF NOT EXISTS credit_runtime_state (
+    user_id INTEGER PRIMARY KEY,
+    accumulated_seconds INTEGER NOT NULL DEFAULT 0,
+    last_metered_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY(user_id) REFERENCES users(user_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_bots_owner ON bots(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_bots_status ON bots(status);
 CREATE INDEX IF NOT EXISTS idx_logs_bot_id ON logs(bot_id, id);
+CREATE INDEX IF NOT EXISTS idx_credit_ledger_user ON credit_ledger(user_id, id);
+CREATE INDEX IF NOT EXISTS idx_credit_reservations_user ON credit_reservations(user_id, status);
 """
 
 
@@ -422,6 +469,396 @@ class Database:
                 (bot_id, limit),
             ).fetchall()
             return list(reversed(rows))
+
+    def _ensure_credit_account_conn(
+        self, conn: sqlite3.Connection, user_id: int, initial_free: int
+    ) -> sqlite3.Row:
+        now = int(time.time())
+        row = conn.execute(
+            "SELECT * FROM credit_accounts WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        if row is not None:
+            return row
+
+        grant = max(0, int(initial_free))
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO users
+                (user_id, username, first_name, last_name, preferred_locale, first_seen_at, last_seen_at)
+            VALUES (?, NULL, NULL, NULL, NULL, ?, ?)
+            """,
+            (user_id, now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO credit_accounts
+                (user_id, balance, free_grant_issued, created_at, updated_at)
+            VALUES (?, ?, 1, ?, ?)
+            """,
+            (user_id, grant, now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO credit_ledger
+                (user_id, amount, balance_after, kind, action, note, created_at)
+            VALUES (?, ?, ?, 'grant', 'initial_free', 'One-time free credits', ?)
+            """,
+            (user_id, grant, grant, now),
+        )
+        return conn.execute(
+            "SELECT * FROM credit_accounts WHERE user_id = ?", (user_id,)
+        ).fetchone()
+
+    def ensure_credit_account(
+        self, user_id: int, initial_free: int
+    ) -> sqlite3.Row:
+        with self.session() as conn:
+            return self._ensure_credit_account_conn(conn, user_id, initial_free)
+
+    def credit_balance(self, user_id: int, initial_free: int) -> int:
+        with self.session() as conn:
+            row = self._ensure_credit_account_conn(conn, user_id, initial_free)
+            return int(row["balance"])
+
+    def reserve_credits(
+        self,
+        user_id: int,
+        amount: int,
+        action: str,
+        initial_free: int,
+        bot_id: int | None = None,
+        note: str | None = None,
+    ) -> tuple[int | None, int]:
+        amount = max(0, int(amount))
+        with self.session() as conn:
+            row = self._ensure_credit_account_conn(conn, user_id, initial_free)
+            balance = int(row["balance"])
+            if amount == 0:
+                return None, balance
+            if balance < amount:
+                return None, balance
+            now = int(time.time())
+            new_balance = balance - amount
+            cur = conn.execute(
+                """
+                INSERT INTO credit_reservations
+                    (user_id, amount, action, status, bot_id, note, created_at, updated_at)
+                VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)
+                """,
+                (user_id, amount, action, bot_id, note, now, now),
+            )
+            reservation_id = int(cur.lastrowid)
+            conn.execute(
+                "UPDATE credit_accounts SET balance = ?, updated_at = ? WHERE user_id = ?",
+                (new_balance, now, user_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO credit_ledger
+                    (user_id, amount, balance_after, kind, action, reservation_id,
+                     bot_id, note, created_at)
+                VALUES (?, ?, ?, 'debit', ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    -amount,
+                    new_balance,
+                    action,
+                    reservation_id,
+                    bot_id,
+                    note,
+                    now,
+                ),
+            )
+            return reservation_id, new_balance
+
+    def settle_credit_reservation(
+        self, reservation_id: int | None, bot_id: int | None = None, note: str | None = None
+    ) -> bool:
+        if reservation_id is None:
+            return False
+        now = int(time.time())
+        with self.session() as conn:
+            row = conn.execute(
+                "SELECT * FROM credit_reservations WHERE id = ?",
+                (reservation_id,),
+            ).fetchone()
+            if row is None or row["status"] != "pending":
+                return False
+            conn.execute(
+                """
+                UPDATE credit_reservations
+                SET status = 'settled',
+                    bot_id = COALESCE(?, bot_id),
+                    note = COALESCE(?, note),
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (bot_id, note, now, reservation_id),
+            )
+            return True
+
+    def refund_credit_reservation(
+        self, reservation_id: int | None, note: str | None = None
+    ) -> bool:
+        if reservation_id is None:
+            return False
+        now = int(time.time())
+        with self.session() as conn:
+            row = conn.execute(
+                "SELECT * FROM credit_reservations WHERE id = ?",
+                (reservation_id,),
+            ).fetchone()
+            if row is None or row["status"] != "pending":
+                return False
+            account = conn.execute(
+                "SELECT * FROM credit_accounts WHERE user_id = ?", (row["user_id"],)
+            ).fetchone()
+            if account is None:
+                return False
+            amount = int(row["amount"])
+            new_balance = int(account["balance"]) + amount
+            conn.execute(
+                """
+                UPDATE credit_reservations
+                SET status = 'refunded', note = COALESCE(?, note), updated_at = ?
+                WHERE id = ?
+                """,
+                (note, now, reservation_id),
+            )
+            conn.execute(
+                "UPDATE credit_accounts SET balance = ?, updated_at = ? WHERE user_id = ?",
+                (new_balance, now, row["user_id"]),
+            )
+            conn.execute(
+                """
+                INSERT INTO credit_ledger
+                    (user_id, amount, balance_after, kind, action, reservation_id,
+                     bot_id, note, created_at)
+                VALUES (?, ?, ?, 'refund', ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["user_id"],
+                    amount,
+                    new_balance,
+                    row["action"],
+                    reservation_id,
+                    row["bot_id"],
+                    note,
+                    now,
+                ),
+            )
+            return True
+
+    def grant_credits(
+        self,
+        user_id: int,
+        amount: int,
+        actor_user_id: int | None,
+        initial_free: int,
+        note: str | None = None,
+        kind: str = "grant",
+    ) -> int:
+        amount = int(amount)
+        with self.session() as conn:
+            row = self._ensure_credit_account_conn(conn, user_id, initial_free)
+            now = int(time.time())
+            new_balance = int(row["balance"]) + amount
+            conn.execute(
+                "UPDATE credit_accounts SET balance = ?, updated_at = ? WHERE user_id = ?",
+                (new_balance, now, user_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO credit_ledger
+                    (user_id, amount, balance_after, kind, action, note,
+                     actor_user_id, created_at)
+                VALUES (?, ?, ?, ?, 'admin_adjustment', ?, ?, ?)
+                """,
+                (user_id, amount, new_balance, kind, note, actor_user_id, now),
+            )
+            return new_balance
+
+    def set_credit_balance(
+        self,
+        user_id: int,
+        balance: int,
+        actor_user_id: int | None,
+        initial_free: int,
+        note: str | None = None,
+    ) -> int:
+        balance = max(0, int(balance))
+        with self.session() as conn:
+            row = self._ensure_credit_account_conn(conn, user_id, initial_free)
+            amount = balance - int(row["balance"])
+            now = int(time.time())
+            conn.execute(
+                "UPDATE credit_accounts SET balance = ?, updated_at = ? WHERE user_id = ?",
+                (balance, now, user_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO credit_ledger
+                    (user_id, amount, balance_after, kind, action, note,
+                     actor_user_id, created_at)
+                VALUES (?, ?, ?, 'set', 'admin_adjustment', ?, ?, ?)
+                """,
+                (user_id, amount, balance, note, actor_user_id, now),
+            )
+            return balance
+
+    def credit_ledger_for_user(
+        self, user_id: int, limit: int = 20
+    ) -> list[sqlite3.Row]:
+        with self.session() as conn:
+            return list(
+                conn.execute(
+                    """
+                    SELECT * FROM credit_ledger
+                    WHERE user_id = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (user_id, limit),
+                ).fetchall()
+            )
+
+    def recent_credit_ledger(self, limit: int = 20) -> list[sqlite3.Row]:
+        with self.session() as conn:
+            return list(
+                conn.execute(
+                    """
+                    SELECT l.*, u.username, u.first_name, u.last_name
+                    FROM credit_ledger l
+                    LEFT JOIN users u ON u.user_id = l.user_id
+                    ORDER BY l.id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            )
+
+    def credit_summary(self) -> sqlite3.Row:
+        with self.session() as conn:
+            return conn.execute(
+                """
+                SELECT
+                    (SELECT COALESCE(SUM(amount), 0) FROM credit_ledger WHERE amount > 0) AS total_issued,
+                    (SELECT COALESCE(SUM(-amount), 0) FROM credit_ledger WHERE amount < 0) AS total_spent,
+                    (SELECT COALESCE(SUM(-amount), 0) FROM credit_ledger WHERE action = 'runtime' AND amount < 0) AS runtime_spent,
+                    (SELECT COUNT(*) FROM credit_accounts WHERE balance <= 5) AS low_balance_users,
+                    (SELECT COUNT(*) FROM credit_accounts) AS account_count
+                """
+            ).fetchone()
+
+    def list_credit_accounts(self, limit: int = 50) -> list[sqlite3.Row]:
+        with self.session() as conn:
+            return list(
+                conn.execute(
+                    """
+                    SELECT a.*, u.username, u.first_name, u.last_name
+                    FROM credit_accounts a
+                    LEFT JOIN users u ON u.user_id = a.user_id
+                    ORDER BY a.balance ASC, a.updated_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            )
+
+    def accrue_runtime_credits(
+        self,
+        user_id: int,
+        bot_count: int,
+        now: int,
+        seconds_per_credit: int,
+        initial_free: int,
+    ):
+        from .credits import RuntimeChargeResult
+
+        bot_count = max(0, int(bot_count))
+        seconds_per_credit = max(1, int(seconds_per_credit))
+        with self.session() as conn:
+            account = self._ensure_credit_account_conn(conn, user_id, initial_free)
+            state = conn.execute(
+                "SELECT * FROM credit_runtime_state WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            if state is None:
+                conn.execute(
+                    """
+                    INSERT INTO credit_runtime_state
+                        (user_id, accumulated_seconds, last_metered_at, updated_at)
+                    VALUES (?, 0, ?, ?)
+                    """,
+                    (user_id, now, now),
+                )
+                return RuntimeChargeResult(user_id, 0, int(account["balance"]), False, 0)
+
+            elapsed = max(0, now - int(state["last_metered_at"]))
+            total_seconds = int(state["accumulated_seconds"]) + (elapsed * bot_count)
+            due = total_seconds // seconds_per_credit
+            remainder = total_seconds % seconds_per_credit
+            balance = int(account["balance"])
+            if due <= 0:
+                conn.execute(
+                    """
+                    UPDATE credit_runtime_state
+                    SET accumulated_seconds = ?, last_metered_at = ?, updated_at = ?
+                    WHERE user_id = ?
+                    """,
+                    (total_seconds, now, now, user_id),
+                )
+                return RuntimeChargeResult(user_id, 0, balance, False, 0)
+
+            charged = min(balance, due)
+            new_balance = balance - charged
+            if charged:
+                conn.execute(
+                    "UPDATE credit_accounts SET balance = ?, updated_at = ? WHERE user_id = ?",
+                    (new_balance, now, user_id),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO credit_ledger
+                        (user_id, amount, balance_after, kind, action, note, created_at)
+                    VALUES (?, ?, ?, 'debit', 'runtime', ?, ?)
+                    """,
+                    (
+                        user_id,
+                        -charged,
+                        new_balance,
+                        f"Runtime: {bot_count} running bot(s)",
+                        now,
+                    ),
+                )
+
+            should_stop = charged < due
+            stored_seconds = seconds_per_credit if should_stop else remainder
+            conn.execute(
+                """
+                UPDATE credit_runtime_state
+                SET accumulated_seconds = ?, last_metered_at = ?, updated_at = ?
+                WHERE user_id = ?
+                """,
+                (stored_seconds, now, now, user_id),
+            )
+            return RuntimeChargeResult(user_id, charged, new_balance, should_stop, int(due))
+
+    def reset_runtime_meter_for_users(self, user_ids: Iterable[int], now: int | None = None) -> None:
+        ids = sorted({int(user_id) for user_id in user_ids})
+        if not ids:
+            return
+        timestamp = int(time.time()) if now is None else int(now)
+        placeholders = ",".join("?" for _ in ids)
+        with self.session() as conn:
+            conn.execute(
+                f"""
+                UPDATE credit_runtime_state
+                SET last_metered_at = ?, updated_at = ?
+                WHERE user_id IN ({placeholders})
+                """,
+                [timestamp, timestamp, *ids],
+            )
 
     def set_many_stopped(self, bot_ids: Iterable[int]) -> None:
         ids = list(bot_ids)
