@@ -39,7 +39,8 @@ logger = logging.getLogger(__name__)
     BROADCAST_CUSTOM_IDS,
     BROADCAST_COMPOSE,
     BROADCAST_CONFIRM,
-) = range(4)
+    ADMIN_ADD_USER,
+) = range(5)
 
 # ─── Status emoji (same as BotMother) ─────────────────────────────────────────
 STATUS_EMOJI = {
@@ -806,6 +807,68 @@ def build_application(settings: Any, db: MgmtDatabase):  # type: ignore[return]
             return
         await admins_panel(update, context)
 
+    async def admin_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        if not await guard(update):
+            return ConversationHandler.END
+        uid = _user_id(update)
+        if not _is_admin_role(uid):
+            await edit_or_reply_html(update, "🔒 Admins only.")
+            return ConversationHandler.END
+        query = update.callback_query
+        role = ROLE_ADMIN
+        if query is not None and query.data == "admin:addb2b_prompt":
+            role = ROLE_B2B
+        context.user_data.clear()
+        context.user_data["admin_add_role"] = role
+        title = "Add Admin" if role == ROLE_ADMIN else "Add B2B User"
+        await edit_or_reply_html(
+            update,
+            f"<b>➕ {title}</b>\n\n"
+            "Send the Telegram user ID, optionally followed by username.\n\n"
+            "<b>Example</b>\n<code>123456789 @username</code>",
+            reply_markup=cancel_keyboard(),
+        )
+        return ADMIN_ADD_USER
+
+    async def admin_add_receive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        if not await guard(update):
+            return ConversationHandler.END
+        uid = _user_id(update)
+        if not _is_admin_role(uid):
+            await reply_html(update.effective_message, "🔒 Admins only.")
+            return ConversationHandler.END
+        role = str(context.user_data.get("admin_add_role") or ROLE_ADMIN)
+        text = (update.effective_message.text or "").strip()
+        parts = text.split()
+        if not parts:
+            await reply_html(
+                update.effective_message,
+                "Please send a Telegram user ID, optionally followed by username.",
+                reply_markup=cancel_keyboard(),
+            )
+            return ADMIN_ADD_USER
+        try:
+            target_id = int(parts[0])
+        except ValueError:
+            await reply_html(
+                update.effective_message,
+                "Invalid user ID. Send numbers only, for example <code>123456789</code>.",
+                reply_markup=cancel_keyboard(),
+            )
+            return ADMIN_ADD_USER
+        username = parts[1].lstrip("@") if len(parts) > 1 else None
+        db.add_admin(target_id, username, None, None, role, uid)
+        logger.info("Added mgmt access from button flow: added_by=%s target=%s role=%s", uid, target_id, role)
+        label = "Admin" if role == ROLE_ADMIN else "B2B user"
+        context.user_data.clear()
+        await reply_html(
+            update.effective_message,
+            f"✅ <b>{label} added</b>\n\n"
+            f"User <code>{target_id}</code> now has <code>{escape(role)}</code> access.",
+            reply_markup=admins_keyboard(),
+        )
+        return ConversationHandler.END
+
     async def credits_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await guard(update):
             return
@@ -1366,6 +1429,25 @@ def build_application(settings: Any, db: MgmtDatabase):  # type: ignore[return]
         per_message=False,
     )
 
+    admin_add_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(
+                admin_add_start,
+                pattern=r"^admin:(add_prompt|addb2b_prompt)$",
+            ),
+        ],
+        states={
+            ADMIN_ADD_USER: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_receive),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CallbackQueryHandler(cancel, pattern=r"^nav:cancel$"),
+        ],
+        per_message=False,
+    )
+
     # ─── Wire application ─────────────────────────────────────────────────────
 
     application = (
@@ -1391,6 +1473,7 @@ def build_application(settings: Any, db: MgmtDatabase):  # type: ignore[return]
     application.add_handler(CommandHandler("removeadmin", removeadmin_command))
     application.add_handler(CommandHandler("history", broadcast_history))
     application.add_handler(broadcast_conv)
+    application.add_handler(admin_add_conv)
     application.add_handler(
         MessageHandler(filters.Regex(reply_button_pattern), reply_button_handler)
     )
