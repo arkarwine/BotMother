@@ -152,6 +152,11 @@ class Database:
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
+    def _lastrowid(self, cursor: sqlite3.Cursor) -> int:
+        if cursor.lastrowid is None:
+            raise RuntimeError("SQLite did not return a row id for insert.")
+        return int(cursor.lastrowid)
+
     @contextmanager
     def session(self) -> Iterator[sqlite3.Connection]:
         conn = self.connect()
@@ -226,7 +231,7 @@ class Database:
                 """,
                 (owner_user_id, chat_id, name, prompt, token, str(workdir), now, now),
             )
-            return int(cur.lastrowid)
+            return self._lastrowid(cur)
 
     def add_revision(
         self,
@@ -245,7 +250,7 @@ class Database:
                 """,
                 (bot_id, prompt, code, validation_status, validation_error, now),
             )
-            return int(cur.lastrowid)
+            return self._lastrowid(cur)
 
     def get_bot(self, bot_id: int, include_deleted: bool = False) -> sqlite3.Row | None:
         where = "b.id = ?" if include_deleted else "b.id = ? AND b.deleted_at IS NULL"
@@ -547,7 +552,7 @@ class Database:
                 """,
                 (user_id, amount, action, bot_id, note, now, now),
             )
-            reservation_id = int(cur.lastrowid)
+            reservation_id = self._lastrowid(cur)
             conn.execute(
                 "UPDATE credit_accounts SET balance = ?, updated_at = ? WHERE user_id = ?",
                 (new_balance, now, user_id),

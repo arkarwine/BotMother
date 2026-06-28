@@ -12,6 +12,7 @@ from .credits import ACTION_ASK, ACTION_EDIT, ACTION_LABELS, ACTION_NEW_BOT, ACT
 from .db import Database
 from .localization import normalize_locale, t
 from .service import BotService, OperationResult
+from .tokens import is_valid_telegram_token
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,11 @@ BOT_LIST_PAGE_SIZE = 10
 def apply_bot_template(prompt: str, template: str | None) -> str:
     mode = template if template in BOT_TEMPLATE_PROMPTS else "other"
     return f"{BOT_TEMPLATE_PROMPTS[mode]}\n\nUser request:\n{prompt.strip()}"
+
+
+def newbot_brief_key(template: str | None) -> str:
+    mode = template if template in BOT_TEMPLATE_PROMPTS else "other"
+    return f"newbot.template_{mode}"
 
 
 def parse_bot_id(args: list[str]) -> int | None:
@@ -163,11 +169,22 @@ def format_bot_list(rows: list[Any], locale: str = "en") -> str:
     return "\n".join(lines)
 
 
-def format_bot_page(rows: list[Any], page: int = 0, locale: str = "en") -> tuple[str, int]:
+def format_bot_page(
+    rows: list[Any],
+    page: int = 0,
+    locale: str = "en",
+    empty_key: str = "empty.bots",
+) -> tuple[str, int]:
     visible_rows, page, total_pages = page_slice(rows, page)
-    text = format_bot_list(visible_rows, locale)
+    text = format_bot_list(visible_rows, locale) if rows else t(empty_key, locale=locale)
     if rows:
-        text += f"\n\n<i>Page {page + 1}/{total_pages} · {len(rows)} total</i>"
+        text += "\n\n" + t(
+            "bots.page_info",
+            locale=locale,
+            page=str(page + 1),
+            pages=str(total_pages),
+            count=str(len(rows)),
+        )
     return text, page
 
 
@@ -193,7 +210,7 @@ def format_logs(rows: list[Any], locale: str = "en") -> str:
 
 
 def compact_bot_label(row: Any) -> str:
-    name = bot_title(row)
+    name = bot_username_label(row) or bot_title(row)
     if len(name) > 34:
         name = name[:31] + "..."
     return f"{STATUS_EMOJI.get(row['status'], '•')} {name}"
@@ -541,6 +558,27 @@ def build_application(token: str, db: Database, service: BotService):
             ]
         )
 
+    def newbot_prompt_keyboard(locale: str = "en"):
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(t("button.examples", locale=locale), callback_data="nav:examples"),
+                    InlineKeyboardButton(t("button.change_mode", locale=locale), callback_data="template:choose"),
+                ],
+                [InlineKeyboardButton(t("button.cancel", locale=locale), callback_data="nav:cancel")],
+            ]
+        )
+
+    def token_retry_keyboard(locale: str = "en"):
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(t("button.reprompt", locale=locale), callback_data="reprompt:newbot"),
+                    InlineKeyboardButton(t("button.cancel", locale=locale), callback_data="nav:cancel"),
+                ]
+            ]
+        )
+
     def main_reply_keyboard(locale: str = "en"):
         return ReplyKeyboardMarkup(
             [
@@ -604,10 +642,6 @@ def build_application(token: str, db: Database, service: BotService):
         return InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton(t("button.new_bot", locale=locale), callback_data="nav:newbot"),
-                    InlineKeyboardButton(t("button.my_bots", locale=locale), callback_data="nav:bots"),
-                ],
-                [
                     InlineKeyboardButton(t("button.create", locale=locale), callback_data="help:create"),
                     InlineKeyboardButton(t("button.manage", locale=locale), callback_data="help:manage"),
                 ],
@@ -637,7 +671,7 @@ def build_application(token: str, db: Database, service: BotService):
                     InlineKeyboardButton(t("button.new_bot", locale=locale), callback_data="nav:newbot"),
                     InlineKeyboardButton(t("button.examples", locale=locale), callback_data="nav:examples"),
                 ],
-                [InlineKeyboardButton(t("button.help", locale=locale), callback_data="nav:help")],
+                [InlineKeyboardButton(t("button.back_help", locale=locale), callback_data="nav:help")],
             ]
         elif category == "manage":
             rows = [
@@ -650,7 +684,7 @@ def build_application(token: str, db: Database, service: BotService):
                     InlineKeyboardButton(t("button.edit_bot", locale=locale), callback_data="pick:edit"),
                 ],
                 [InlineKeyboardButton(t("button.revise", locale=locale), callback_data="pick:revise")],
-                [InlineKeyboardButton(t("button.help", locale=locale), callback_data="nav:help")],
+                [InlineKeyboardButton(t("button.back_help", locale=locale), callback_data="nav:help")],
             ]
         elif category == "ops":
             rows = [
@@ -664,7 +698,7 @@ def build_application(token: str, db: Database, service: BotService):
                         t("button.delete", locale=locale), callback_data="pick:delete_confirm"
                     ),
                 ],
-                [InlineKeyboardButton(t("button.help", locale=locale), callback_data="nav:help")],
+                [InlineKeyboardButton(t("button.back_help", locale=locale), callback_data="nav:help")],
             ]
         elif category == "utils":
             rows = [
@@ -674,7 +708,7 @@ def build_application(token: str, db: Database, service: BotService):
                 ],
                 [InlineKeyboardButton(t("button.language", locale=locale), callback_data="nav:language")],
                 [InlineKeyboardButton(t("button.examples", locale=locale), callback_data="nav:examples")],
-                [InlineKeyboardButton(t("button.help", locale=locale), callback_data="nav:help")],
+                [InlineKeyboardButton(t("button.back_help", locale=locale), callback_data="nav:help")],
             ]
         elif category == "credits":
             rows = [
@@ -682,7 +716,7 @@ def build_application(token: str, db: Database, service: BotService):
                     InlineKeyboardButton(t("button.credits", locale=locale), callback_data="nav:credits"),
                     InlineKeyboardButton(t("button.new_bot", locale=locale), callback_data="nav:newbot"),
                 ],
-                [InlineKeyboardButton(t("button.help", locale=locale), callback_data="nav:help")],
+                [InlineKeyboardButton(t("button.back_help", locale=locale), callback_data="nav:help")],
             ]
         elif category == "fallback":
             rows = [
@@ -717,7 +751,7 @@ def build_application(token: str, db: Database, service: BotService):
                     InlineKeyboardButton(t("button.examples", locale=locale), callback_data="nav:examples"),
                     InlineKeyboardButton(t("button.cancel", locale=locale), callback_data="nav:cancel"),
                 ],
-                [InlineKeyboardButton(t("button.help", locale=locale), callback_data="nav:help")],
+                [InlineKeyboardButton(t("button.back_help", locale=locale), callback_data="nav:help")],
             ]
         else:
             rows = [
@@ -725,7 +759,7 @@ def build_application(token: str, db: Database, service: BotService):
                     InlineKeyboardButton(t("button.new_bot", locale=locale), callback_data="nav:newbot"),
                     InlineKeyboardButton(t("button.my_bots", locale=locale), callback_data="nav:bots"),
                 ],
-                [InlineKeyboardButton(t("button.help", locale=locale), callback_data="nav:help")],
+                [InlineKeyboardButton(t("button.back_help", locale=locale), callback_data="nav:help")],
             ]
         return InlineKeyboardMarkup(rows)
 
@@ -748,6 +782,14 @@ def build_application(token: str, db: Database, service: BotService):
                     InlineKeyboardButton(t("button.examples", locale=locale), callback_data="nav:examples"),
                     InlineKeyboardButton(t("button.help", locale=locale), callback_data="nav:help"),
                 ],
+            ]
+        )
+
+    def search_empty_keyboard(locale: str = "en"):
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(t("button.my_bots", locale=locale), callback_data="nav:bots")],
+                [InlineKeyboardButton(t("button.home", locale=locale), callback_data="nav:home")],
             ]
         )
 
@@ -1058,26 +1100,36 @@ def build_application(token: str, db: Database, service: BotService):
             await query.answer()
         _remember_user(db, update)
         template = (query.data if query else "template:other").split(":", 1)[1]
+        if template == "choose":
+            await edit_or_reply_html(
+                update,
+                format_paid_action_intro(
+                    update, service, ACTION_NEW_BOT, tr(update, "newbot.choose_template")
+                ),
+                reply_markup=template_keyboard(locale_for_update(update)),
+            )
+            return NEW_PROMPT
         if template not in BOT_TEMPLATE_PROMPTS:
             template = "other"
         context.user_data["newbot_template"] = template
         await edit_or_reply_html(
             update,
-            tr(update, f"newbot.template_{template}"),
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            tr(update, "button.examples"), callback_data="nav:examples"
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            tr(update, "button.cancel"), callback_data="nav:cancel"
-                        )
-                    ],
-                ]
-            ),
+            tr(update, newbot_brief_key(template)),
+            reply_markup=newbot_prompt_keyboard(locale_for_update(update)),
+        )
+        return NEW_PROMPT
+
+    async def newbot_examples_button(
+        update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        query = update.callback_query
+        if query is not None:
+            await query.answer()
+        _remember_user(db, update)
+        await edit_or_reply_html(
+            update,
+            tr(update, "newbot.examples_in_flow"),
+            reply_markup=newbot_prompt_keyboard(locale_for_update(update)),
         )
         return NEW_PROMPT
 
@@ -1087,8 +1139,8 @@ def build_application(token: str, db: Database, service: BotService):
         if not raw_prompt:
             await reply_html(
                 update.effective_message,
-                tr(update, "newbot.empty_prompt"),
-                reply_markup=flow_keyboard(locale_for_update(update)),
+                tr(update, newbot_brief_key(context.user_data.get("newbot_template"))),
+                reply_markup=newbot_prompt_keyboard(locale_for_update(update)),
             )
             return NEW_PROMPT
         template = str(context.user_data.get("newbot_template", "other"))
@@ -1250,6 +1302,33 @@ def build_application(token: str, db: Database, service: BotService):
             )
             context.user_data.clear()
             return ConversationHandler.END
+        if not is_valid_telegram_token(token_text):
+            await reply_html(
+                update.effective_message,
+                tr(update, "newbot.token_invalid"),
+                reply_markup=token_retry_keyboard(locale_for_update(update)),
+            )
+            return NEW_TOKEN
+        if token_text == service.settings.mother_bot_token:
+            await reply_html(
+                update.effective_message,
+                tr(update, "newbot.token_mother"),
+                reply_markup=token_retry_keyboard(locale_for_update(update)),
+            )
+            return NEW_TOKEN
+        existing = db.get_bot_by_token(token_text)
+        if existing is not None:
+            duplicate_key = (
+                "newbot.token_duplicate"
+                if service.is_owner(user_id) or int(existing["owner_user_id"]) == user_id
+                else "newbot.token_duplicate_other"
+            )
+            await reply_html(
+                update.effective_message,
+                tr(update, duplicate_key, title=escape(bot_title(existing))),
+                reply_markup=token_retry_keyboard(locale_for_update(update)),
+            )
+            return NEW_TOKEN
         progress_message = await reply_html(
             update.effective_message,
             tr(update, "newbot.launching"),
@@ -1309,22 +1388,32 @@ def build_application(token: str, db: Database, service: BotService):
         if not query:
             await reply_html(
                 update.effective_message,
-                "<b>🔎 Search</b>\n\nSend <code>/search text</code> to find bots by name, username, status, or owner.",
+                tr(update, "search.usage"),
                 reply_markup=keyboard_for_user(user_id),
             )
             return
         rows = [row for row in service.list_bots_for(user_id) if bot_matches(row, query)]
         context.user_data["last_search_query"] = query
-        page_text, page = format_bot_page(rows, locale=locale_for_update(update))
+        locale = locale_for_update(update)
+        page_text, page = format_bot_page(rows, locale=locale, empty_key="search.empty")
         await reply_html(
             update.effective_message,
-            f"<b>🔎 Search results</b>\n\nQuery: <code>{escape(query)}</code>\nMatches: <code>{len(rows)}</code>\n\n"
-            + page_text,
-            reply_markup=bots_keyboard(
-                rows,
-                locale=locale_for_update(update),
-                page=page,
-                pager_prefix="search_page",
+            tr(
+                update,
+                "search.results",
+                query=escape(query),
+                count=str(len(rows)),
+                results=page_text,
+            ),
+            reply_markup=(
+                bots_keyboard(
+                    rows,
+                    locale=locale,
+                    page=page,
+                    pager_prefix="search_page",
+                )
+                if rows
+                else search_empty_keyboard(locale)
             ),
         )
 
@@ -1727,19 +1816,29 @@ def build_application(token: str, db: Database, service: BotService):
             rows = service.list_bots_for(user_id)
             if search_query:
                 rows = [row for row in rows if bot_matches(row, search_query)]
+            locale = locale_for_update(update)
             text, page = format_bot_page(
-                rows, page=int(raw_page), locale=locale_for_update(update)
+                rows, page=int(raw_page), locale=locale, empty_key="search.empty"
             )
             await edit_or_reply_html(
                 update,
-                f"<b>🔎 Search results</b>\n\nQuery: <code>{escape(search_query or 'all')}</code>\nMatches: <code>{len(rows)}</code>\n\n"
-                + text,
-                reply_markup=bots_keyboard(
-                    rows,
-                    action=action,
-                    locale=locale_for_update(update),
-                    page=page,
-                    pager_prefix="search_page",
+                tr(
+                    update,
+                    "search.results",
+                    query=escape(search_query or "all"),
+                    count=str(len(rows)),
+                    results=text,
+                ),
+                reply_markup=(
+                    bots_keyboard(
+                        rows,
+                        action=action,
+                        locale=locale,
+                        page=page,
+                        pager_prefix="search_page",
+                    )
+                    if rows
+                    else search_empty_keyboard(locale)
                 ),
             )
             return
@@ -1897,7 +1996,7 @@ def build_application(token: str, db: Database, service: BotService):
                                 tr(update, "button.yes_delete"), callback_data=f"delete:{bot_id}"
                             ),
                             InlineKeyboardButton(
-                                tr(update, "button.my_bots"), callback_data=f"status:{bot_id}"
+                                tr(update, "button.keep_bot"), callback_data=f"status:{bot_id}"
                             ),
                         ]
                     ]
@@ -2399,6 +2498,7 @@ def build_application(token: str, db: Database, service: BotService):
         states={
             NEW_PROMPT: [
                 CallbackQueryHandler(newbot_template, pattern=r"^template:\w+$"),
+                CallbackQueryHandler(newbot_examples_button, pattern=r"^nav:examples$"),
                 MessageHandler(conversation_text, newbot_prompt),
             ],
             NEW_FOLLOWUP: [

@@ -10,10 +10,12 @@ from botmother.handlers import (
     chunk_text,
     compact_bot_label,
     format_ai_questions,
+    format_bot_page,
     format_bot_list,
     format_logs,
     help_category_text,
     locale_for_update,
+    newbot_brief_key,
     parse_ask_args,
     parse_bot_id,
     parse_tail_args,
@@ -117,6 +119,46 @@ class HandlerHelperTests(unittest.TestCase):
         self.assertNotIn("@alice", text)
         self.assertIn("running", text)
 
+    def test_format_bot_page_only_renders_current_page(self):
+        rows = [
+            FakeRow(
+                id=index,
+                status="running",
+                name=f"Bot {index}",
+                owner_username="alice",
+                bot_username=f"bot_{index}",
+            )
+            for index in range(12)
+        ]
+
+        text, page = format_bot_page(rows, page=1, locale="en")
+
+        self.assertEqual(page, 1)
+        self.assertIn("Bot 10", text)
+        self.assertIn("Bot 11", text)
+        self.assertNotIn("Bot 0", text)
+        self.assertIn("Page 2/2", text)
+
+    def test_format_bot_page_uses_search_empty_state(self):
+        text, page = format_bot_page([], locale="en", empty_key="search.empty")
+
+        self.assertEqual(page, 0)
+        self.assertIn("No matching bots", text)
+        self.assertNotIn("No child bots yet", text)
+
+    def test_compact_bot_label_prefers_bot_username(self):
+        text = compact_bot_label(
+            FakeRow(
+                id=3,
+                status="running",
+                name="Internal Display Name",
+                bot_username="shop_helper_bot",
+            )
+        )
+
+        self.assertIn("@shop_helper_bot", text)
+        self.assertNotIn("Internal Display Name", text)
+
     def test_compact_bot_label_truncates_long_names(self):
         text = compact_bot_label(
             FakeRow(
@@ -146,6 +188,11 @@ class HandlerHelperTests(unittest.TestCase):
 
         self.assertIn("Mode: custom bot", text)
         self.assertIn("custom workflow", text)
+
+    def test_newbot_brief_key_defaults_to_custom_brief(self):
+        self.assertEqual(newbot_brief_key("shop"), "newbot.template_shop")
+        self.assertEqual(newbot_brief_key("nonsense"), "newbot.template_other")
+        self.assertEqual(newbot_brief_key(None), "newbot.template_other")
 
     def test_format_ai_questions_appends_structured_questions_after_message(self):
         decision = AIDecision(

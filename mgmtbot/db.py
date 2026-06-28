@@ -74,6 +74,11 @@ class MgmtDatabase:
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
+    def _lastrowid(self, cursor: sqlite3.Cursor) -> int:
+        if cursor.lastrowid is None:
+            raise RuntimeError("SQLite did not return a row id for insert.")
+        return int(cursor.lastrowid)
+
     @contextmanager
     def session(self) -> Iterator[sqlite3.Connection]:
         conn = self.connect()
@@ -286,7 +291,7 @@ class MgmtDatabase:
                     now,
                 ),
             )
-            return int(cur.lastrowid)
+            return self._lastrowid(cur)
 
     def finish_broadcast(
         self, broadcast_id: int, sent_count: int, fail_count: int

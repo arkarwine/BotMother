@@ -400,18 +400,17 @@ def build_application(settings: Any, db: MgmtDatabase):  # type: ignore[return]
         text = "\n".join(lines)
         return text[-3500:] if len(text) > 3500 else text
 
-    def format_users_summary(users: list) -> str:
+    def format_users_summary(users: list, total_count: int | None = None) -> str:
         if not users:
             return "No users yet."
-        lines = ["<b>👥 Users</b>", f"Total: <code>{len(users)}</code>", ""]
-        for u in users[:15]:
+        total = len(users) if total_count is None else total_count
+        lines = ["<b>👥 Users</b>", f"Total: <code>{total}</code>", ""]
+        for u in users:
             uname = str(u["username"] or "").strip()
             first = str(u["first_name"] or "").strip()
             last = str(u["last_name"] or "").strip()
             display = f"@{uname}" if uname else " ".join(p for p in (first, last) if p) or str(u["user_id"])
             lines.append(f"<code>{u['user_id']}</code>  {escape(display)}")
-        if len(users) > 15:
-            lines.append(f"\n<i>…and {len(users) - 15} more</i>")
         return "\n".join(lines)
 
     def format_admins_list(admins: list) -> str:
@@ -734,7 +733,7 @@ def build_application(settings: Any, db: MgmtDatabase):  # type: ignore[return]
         logger.info("Users: user_id=%s", uid)
         users = db.list_all_users()
         visible_users, page, total_pages = page_slice(users, page)
-        text = format_users_summary(visible_users)
+        text = format_users_summary(visible_users, total_count=len(users))
         if users:
             text += f"\n\n<i>Page {page + 1}/{total_pages} · {len(users)} total</i>"
         await edit_or_reply_html(

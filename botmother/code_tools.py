@@ -358,7 +358,7 @@ class StaticTypeVisitor(ast.NodeVisitor):
         self.visit(node.value)
         self._define_target(node.target)
 
-    def visit_For(self, node: ast.For) -> None:
+    def visit_For(self, node: ast.For | ast.AsyncFor) -> None:
         self.visit(node.iter)
         self._define_target(node.target)
         for statement in [*node.body, *node.orelse]:
@@ -367,7 +367,7 @@ class StaticTypeVisitor(ast.NodeVisitor):
     def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
         self.visit_For(node)
 
-    def visit_With(self, node: ast.With) -> None:
+    def visit_With(self, node: ast.With | ast.AsyncWith) -> None:
         for item in node.items:
             self.visit(item.context_expr)
             if item.optional_vars is not None:
