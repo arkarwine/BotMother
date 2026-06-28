@@ -8,7 +8,7 @@ The generated child bot is raw standalone Python. There is no user-facing schema
 
 - Anyone chatting with the mother bot can create a child bot for testing.
 - Users provide child bot tokens from `@BotFather`.
-- Gemini code generation with `gemini-3.1-flash-lite`.
+- OpenRouter-backed AI generation using separate models for interaction/planning and coding.
 - SQLite state for users, bots, revisions, and recent logs.
 - Commands for create, examples/help, AI-guided prompt edit, ask, start, stop, restart, delete, status, identity, health, and tail/logs.
 - Button-first manager UX with a persistent reply keyboard and inline bot action buttons.
@@ -38,8 +38,13 @@ Set these values in `.env`:
 
 ```env
 MOTHER_BOT_TOKEN=123456:mother-token-from-botfather
-GEMINI_API_KEY=your-gemini-key
-GEMINI_MODEL=gemini-3.1-flash-lite
+OPENROUTER_API_KEY=your-openrouter-key
+OPENROUTER_MODEL=
+OPENROUTER_INTERACTION_MODEL=google/gemini-2.5-pro
+OPENROUTER_CODING_MODEL=deepseek/deepseek-v4-pro
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_APP_NAME=BotMother
+OPENROUTER_APP_URL=
 BOTMOTHER_DB=./data/botmother.sqlite3
 BOTMOTHER_WORKDIR=./data/bots
 OWNER_IDS=123456789
@@ -140,7 +145,7 @@ For Telegram formatting, generated bots should prefer `ParseMode.HTML` and escap
 
 If the AI asks for an external API key or config value, BotMother stores the supplied value as a per-bot environment variable and passes it to that child bot at runtime.
 
-BotMother always injects `BOT_TOKEN`, `BOT_DB_PATH`, `PATH`, `PYTHONUNBUFFERED`, and `PYTHONIOENCODING` itself. The AI planner is told not to include those names in generated env values; if it does anyway, BotMother asks Gemini to repair the JSON response with the validation error before continuing.
+BotMother always injects `BOT_TOKEN`, `BOT_DB_PATH`, `PATH`, `PYTHONUNBUFFERED`, and `PYTHONIOENCODING` itself. The AI planner is told not to include those names in generated env values; if it does anyway, BotMother asks the OpenRouter model to repair the JSON response with the validation error before continuing.
 
 ## Localization
 
@@ -156,6 +161,25 @@ Generated bots default to English unless the user explicitly asks for another la
 Users can change the manager language from the `🌐 Language` inline button or `/language`. The choice is stored per Telegram user in SQLite and overrides Telegram's `language_code`.
 
 AI planning, follow-up questions, readiness checks, Ask Bot answers, and generated child bot UI text follow the user’s selected BotMother language. If the user has not chosen a language, the AI uses Myanmar/Burmese by default.
+
+## AI Model Routing
+
+BotMother uses OpenRouter and can route different AI jobs to different models:
+
+- `OPENROUTER_INTERACTION_MODEL` handles user-facing planning, follow-up questions, readiness checks, and Ask Bot answers.
+- `OPENROUTER_CODING_MODEL` handles raw Python generation, prompt edits, and refinement layers.
+- `OPENROUTER_MODEL` is an optional fallback when a role-specific model is not set.
+
+For New Bot/Edit/Revise, the interaction model first turns the user's request, answers, locale, and relevant requester context into a full English implementation prompt. The coding model receives that Gemini-written prompt instead of raw chat text. This keeps raw user interaction context separate while still giving the coding model the complete translated context it needs.
+
+The default performance/price split is:
+
+```env
+OPENROUTER_INTERACTION_MODEL=google/gemini-2.5-pro
+OPENROUTER_CODING_MODEL=deepseek/deepseek-v4-pro
+```
+
+For existing deployments, `GEMINI_API_KEY` and `GEMINI_MODEL` are still accepted as temporary compatibility fallbacks, but new installs should use the OpenRouter variables above.
 
 ## Security Notes
 
@@ -218,7 +242,7 @@ Tap `✏️ Edit Bot`, choose the bot, then describe the change you want in norm
 
 ## Templates, Dashboard, And Auto Fix
 
-New Bot starts with a mode picker: Shop, Booking, Support, Quiz, Channel, or Other. The selected mode is added as hidden planning context, so users still describe the bot naturally while Gemini gets a stronger product starting point.
+New Bot starts with a mode picker: Shop, Booking, Support, Quiz, Channel, or Other. The selected mode is added as hidden planning context, so users still describe the bot naturally while the interaction model builds a stronger English implementation prompt.
 
 Each child bot page now acts as a dashboard with username, status, process state, PID, owner, revision count, env var names, validation summary, and the latest issue from recent logs. The `🧪 Validation` action shows the syntax, security, static AST, Telegram hook, and mypy layers.
 
@@ -226,13 +250,13 @@ Use `🛠️ Auto Fix` or `/fix <id>` when a bot has an error. BotMother sends t
 
 ## AI Follow-Ups
 
-For New Bot and Edit Bot, BotMother asks Gemini for a strict JSON decision. The decision type is either `questions` or `code`. BotMother includes useful Telegram user/chat context, such as user ID, username, names, language code, chat ID, and chat type, so Gemini can make better defaults without asking for basic identity details. When the AI returns questions, BotMother sends Gemini's user-facing message directly, then sends the user's answer back into the next AI turn. The structured question fields are internal only, so BotMother does not add visible question numbers, suggestion labels, or follow-up counters. To avoid endless loops, BotMother allows up to 5 internal follow-up rounds, then forces a final code decision or ends the flow if the AI still cannot proceed safely.
+For New Bot and Edit Bot, BotMother asks the interaction model for a strict JSON decision. The decision type is either `questions` or `code`; in this pipeline, `code` means a full English implementation prompt, not Python source. BotMother includes useful Telegram user/chat context, such as user ID, username, names, language code, chat ID, and chat type, so the interaction model can translate relevant context into build requirements without asking for basic identity details. When the AI returns questions, BotMother sends the model's user-facing message directly, then sends the user's answer back into the next AI turn. The structured question fields are internal only, so BotMother does not add visible question numbers, suggestion labels, or follow-up counters. BotMother allows up to 5 internal follow-up rounds; each round may ask as many necessary questions as the schema permits, currently up to 3 at a time.
 
 After the normal `/newbot` questions, BotMother runs a separate readiness check before asking for the BotFather token, including after follow-up answers. This check asks only for missing essential data needed to run the bot, such as required admin IDs, API keys, payment/contact details, or external service settings. It does not ask optional preference questions and it never asks for the Telegram token.
 
 Before saving and launching generated code, BotMother runs bounded AI refinement layers. Each layer must return raw standalone Python. BotMother validates each candidate with syntax, denylist, static AST, required Telegram UX hooks, and `mypy` checks, then keeps the last valid version, so a bad refinement pass cannot overwrite a deployable previous pass.
 
-Planner JSON repair is also bounded. If Gemini returns invalid JSON or tries to set reserved runtime env vars such as `BOT_TOKEN`, BotMother sends the validation error back to Gemini for up to 2 repair attempts, then falls back to asking the user to restate the request.
+Planner JSON repair is also bounded. If the OpenRouter model returns invalid JSON or tries to set reserved runtime env vars such as `BOT_TOKEN`, BotMother sends the validation error back for up to 2 repair attempts, then falls back to asking the user to restate the request.
 
 ---
 

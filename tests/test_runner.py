@@ -18,8 +18,13 @@ from botmother.runner import (
 def make_settings(tmp: str) -> Settings:
     return Settings(
         mother_bot_token="11111:mother_token_abcdefghijklmnopqrstuvwxyz",
-        gemini_api_key="test",
-        gemini_model="gemini-3.1-flash-lite",
+        openrouter_api_key="test",
+        openrouter_model="",
+        openrouter_interaction_model="google/gemini-2.5-pro",
+        openrouter_coding_model="deepseek/deepseek-v4-pro",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        openrouter_app_name="BotMother tests",
+        openrouter_app_url="",
         db_path=Path(tmp) / "botmother.sqlite3",
         workdir=Path(tmp) / "bots",
         owner_ids={1},
@@ -155,8 +160,13 @@ class RunnerTests(unittest.TestCase):
             settings = make_settings(tmp)
             settings = Settings(
                 mother_bot_token=settings.mother_bot_token,
-                gemini_api_key=settings.gemini_api_key,
-                gemini_model=settings.gemini_model,
+                openrouter_api_key=settings.openrouter_api_key,
+                openrouter_model=settings.openrouter_model,
+                openrouter_interaction_model=settings.openrouter_interaction_model,
+                openrouter_coding_model=settings.openrouter_coding_model,
+                openrouter_base_url=settings.openrouter_base_url,
+                openrouter_app_name=settings.openrouter_app_name,
+                openrouter_app_url=settings.openrouter_app_url,
                 db_path=settings.db_path,
                 workdir=settings.workdir,
                 owner_ids=settings.owner_ids,

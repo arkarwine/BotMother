@@ -1,39 +1,107 @@
 import unittest
+from unittest.mock import patch
 
-from botmother.ai import AIDecision, AIResponseError, GeminiCodeGenerator, parse_ai_decision, parse_readiness_decision
-
-
-class FakeResponse:
-    def __init__(self, text):
-        self.text = text
+from botmother.ai import AIDecision, AIResponseError, OpenRouterCodeGenerator, parse_ai_decision, parse_readiness_decision
 
 
-class FakeModels:
+class FakeGenerator(OpenRouterCodeGenerator):
     def __init__(self, texts):
+        self.api_key = "test"
+        self.model = "test-model"
+        self.interaction_model = "interaction-model"
+        self.coding_model = "coding-model"
+        self.base_url = "https://openrouter.ai/api/v1"
+        self.app_name = "BotMother tests"
+        self.app_url = ""
         self.texts = list(texts)
         self.calls = []
 
-    def generate_content(self, **kwargs):
-        self.calls.append(kwargs)
+    def _chat(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        json_mode: bool = False,
+        model: str | None = None,
+    ) -> str:
+        self.calls.append(
+            {
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "json_mode": json_mode,
+                "model": model,
+            }
+        )
         if not self.texts:
-            raise AssertionError("No fake Gemini responses left.")
-        return FakeResponse(self.texts.pop(0))
-
-
-class FakeClient:
-    def __init__(self, texts):
-        self.models = FakeModels(texts)
+            raise AssertionError("No fake OpenRouter responses left.")
+        return self.texts.pop(0)
 
 
 def make_generator(texts):
-    generator = GeminiCodeGenerator.__new__(GeminiCodeGenerator)
-    generator.api_key = "test"
-    generator.model = "test-model"
-    generator._client = FakeClient(texts)
-    return generator
+    return FakeGenerator(texts)
+
+
+class FakeHTTPResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return b'{"choices":[{"message":{"content":"hello"}}]}'
 
 
 class AIDecisionTests(unittest.TestCase):
+    def test_openrouter_chat_posts_openai_compatible_payload(self):
+        generator = OpenRouterCodeGenerator(
+            api_key="sk-test",
+            model="fallback-model",
+            interaction_model="google/gemini-2.5-pro",
+            coding_model="deepseek/deepseek-v4-pro",
+            app_name="BotMother tests",
+            app_url="https://example.test",
+        )
+
+        with patch("urllib.request.urlopen", return_value=FakeHTTPResponse()) as mocked:
+            text = generator._chat("system", "user", json_mode=True)
+
+        self.assertEqual(text, "hello")
+        request = mocked.call_args.args[0]
+        body = request.data.decode("utf-8")
+        self.assertEqual(request.headers["Authorization"], "Bearer sk-test")
+        self.assertEqual(request.headers["X-title"], "BotMother tests")
+        self.assertEqual(request.headers["Http-referer"], "https://example.test")
+        self.assertIn('"model": "fallback-model"', body)
+        self.assertIn('"response_format": {"type": "json_object"}', body)
+
+    def test_model_routing_uses_interaction_and_coding_models(self):
+        generator = make_generator(
+            [
+                "Full English implementation prompt. Target UI language: Myanmar/Burmese. Admin user id: 1.",
+                """
+                {
+                  "type": "ready",
+                  "message": "Ready.",
+                  "questions": []
+                }
+                """,
+                "print('code')",
+            ]
+        )
+        code_decision = AIDecision("code", "Ready.", (), "print('ok')", ())
+
+        implementation_prompt = generator.build_coding_brief("make bot", "Telegram user ID: 1")
+        generator.check_new_bot_readiness("make bot", [], code_decision)
+        generator.generate_code(implementation_prompt)
+
+        self.assertEqual(generator.calls[0]["model"], "interaction-model")
+        self.assertIn("Telegram user ID: 1", generator.calls[0]["user_prompt"])
+        self.assertEqual(generator.calls[1]["model"], "interaction-model")
+        self.assertEqual(generator.calls[2]["model"], "coding-model")
+        self.assertNotIn("Requester context", generator.calls[2]["user_prompt"])
+        self.assertIn("Target UI language", generator.calls[2]["user_prompt"])
+        self.assertIn("Admin user id: 1", generator.calls[2]["user_prompt"])
+
     def test_parse_questions_decision(self):
         decision = parse_ai_decision(
             """
@@ -150,6 +218,36 @@ class AIDecisionTests(unittest.TestCase):
 
         self.assertIn("questions array is empty", str(caught.exception))
 
+    def test_reject_choice_message_without_suggestions(self):
+        with self.assertRaises(AIResponseError) as caught:
+            parse_ai_decision(
+                """
+                {
+                  "type": "questions",
+                  "message": "Please choose one of the following product management methods.",
+                  "questions": [{"id": "products", "question": "How should products be managed?", "suggestions": []}],
+                  "code": null,
+                  "env": []
+                }
+                """
+            )
+
+        self.assertIn("choose from options", str(caught.exception))
+
+    def test_reject_burmese_choice_question_without_suggestions(self):
+        with self.assertRaises(AIResponseError) as caught:
+            parse_readiness_decision(
+                """
+                {
+                  "type": "questions",
+                  "message": "ကုန်ပစ္စည်းစာရင်းကို စနစ်တကျစီမံခန့်ခွဲနိုင်ဖို့အတွက် အောက်ပါနည်းလမ်းများထဲမှ တစ်ခုကို ရွေးချယ်ပေးပါ။",
+                  "questions": [{"id": "product_management", "question": "ကုန်ပစ္စည်းစာရင်းကို ဘယ်လိုစီမံခန့်ခွဲချင်ပါသလဲ?", "suggestions": []}]
+                }
+                """
+            )
+
+        self.assertIn("choose from options", str(caught.exception))
+
     def test_json_generation_repairs_empty_question_message(self):
         bad = """
         {
@@ -175,7 +273,7 @@ class AIDecisionTests(unittest.TestCase):
 
         self.assertTrue(decision.needs_questions)
         self.assertEqual(decision.questions[0].id, "admin_ids")
-        repair_prompt = generator._client.models.calls[1]["contents"]
+        repair_prompt = generator.calls[1]["user_prompt"]
         self.assertIn("questions array is empty", repair_prompt)
 
     def test_reject_reserved_env_name(self):
@@ -217,8 +315,8 @@ class AIDecisionTests(unittest.TestCase):
 
         self.assertEqual(decision.type, "code")
         self.assertEqual(decision.env, ())
-        self.assertEqual(len(generator._client.models.calls), 2)
-        repair_prompt = generator._client.models.calls[1]["contents"]
+        self.assertEqual(len(generator.calls), 2)
+        repair_prompt = generator.calls[1]["user_prompt"]
         self.assertIn("Env var #1 uses reserved runtime name 'BOT_TOKEN'", repair_prompt)
         self.assertIn("BOT_TOKEN", repair_prompt)
         self.assertIn('os.environ["BOT_TOKEN"]', repair_prompt)
@@ -239,7 +337,7 @@ class AIDecisionTests(unittest.TestCase):
 
         self.assertTrue(decision.needs_questions)
         self.assertEqual(decision.questions[0].id, "clarify_request")
-        self.assertEqual(len(generator._client.models.calls), 3)
+        self.assertEqual(len(generator.calls), 3)
 
     def test_parse_readiness_ready(self):
         decision = parse_readiness_decision(
@@ -286,10 +384,11 @@ class AIDecisionTests(unittest.TestCase):
         decision = generator.check_new_bot_readiness("make an echo bot", [], code_decision)
 
         self.assertEqual(decision.type, "ready")
-        call = generator._client.models.calls[0]
-        self.assertEqual(call["config"]["response_mime_type"], "application/json")
-        self.assertIn("Final readiness check", call["contents"])
-        self.assertIn("Do not ask for the Telegram token", call["contents"])
+        call = generator.calls[0]
+        self.assertTrue(call["json_mode"])
+        self.assertIn("Final readiness check", call["user_prompt"])
+        self.assertIn("Do not ask for the Telegram token", call["user_prompt"])
+        self.assertIn("English implementation prompt", call["user_prompt"])
 
     def test_refine_code_for_deploy_returns_raw_python(self):
         generator = make_generator(["print('refined')"])
@@ -304,10 +403,12 @@ class AIDecisionTests(unittest.TestCase):
         )
 
         self.assertEqual(code, "print('refined')")
-        call = generator._client.models.calls[0]
-        self.assertIn("Layer 2/3", call["contents"])
-        self.assertIn("WEATHER_API_KEY", call["contents"])
-        self.assertIn("old error", call["contents"])
+        call = generator.calls[0]
+        self.assertFalse(call["json_mode"])
+        self.assertIn("Layer 2/3", call["user_prompt"])
+        self.assertIn("WEATHER_API_KEY", call["user_prompt"])
+        self.assertIn("old error", call["user_prompt"])
+        self.assertNotIn("Requester context", call["user_prompt"])
 
 
 if __name__ == "__main__":

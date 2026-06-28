@@ -62,11 +62,13 @@ class FakeGenerator:
         self.readiness = AIReadinessDecision("ready", "Ready.", ())
         self.current_code = None
         self.edit_prompt = None
+        self.edit_code_prompt = None
         self.answer_history = None
         self.force_code = None
         self.bot_context = None
         self.bot_question = None
         self.refinement_calls = []
+        self.coding_brief_calls = []
         self.new_bot_calls = 0
         self.new_bot_prompt = None
         self.user_context = None
@@ -118,6 +120,16 @@ class FakeGenerator:
         self.user_context = user_context
         return self.edited_code
 
+    def build_coding_brief(self, prompt: str, user_context: str = ""):
+        self.coding_brief_calls.append({"prompt": prompt, "user_context": user_context})
+        return f"Full English implementation prompt:\n{prompt}"
+
+    def edit_code(self, current_code: str, edit_prompt: str, user_context: str = ""):
+        self.current_code = current_code
+        self.edit_code_prompt = edit_prompt
+        self.user_context = user_context
+        return self.edited_code
+
     def refine_code_for_deploy(
         self,
         user_prompt: str,
@@ -145,8 +157,13 @@ class FakeGenerator:
 def make_settings(tmp: str) -> Settings:
     return Settings(
         mother_bot_token="11111:mother_token_abcdefghijklmnopqrstuvwxyz",
-        gemini_api_key="test",
-        gemini_model="gemini-3.1-flash-lite",
+        openrouter_api_key="test",
+        openrouter_model="",
+        openrouter_interaction_model="google/gemini-2.5-pro",
+        openrouter_coding_model="deepseek/deepseek-v4-pro",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        openrouter_app_name="BotMother tests",
+        openrouter_app_url="",
         db_path=Path(tmp) / "botmother.sqlite3",
         workdir=Path(tmp) / "bots",
         owner_ids={1},

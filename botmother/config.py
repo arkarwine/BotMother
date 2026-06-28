@@ -55,8 +55,13 @@ def _path_from_env(value: str, base_dir: Path) -> Path:
 @dataclass(frozen=True)
 class Settings:
     mother_bot_token: str
-    gemini_api_key: str
-    gemini_model: str
+    openrouter_api_key: str
+    openrouter_model: str
+    openrouter_interaction_model: str
+    openrouter_coding_model: str
+    openrouter_base_url: str
+    openrouter_app_name: str
+    openrouter_app_url: str
     db_path: Path
     workdir: Path
     owner_ids: set[int]
@@ -83,8 +88,31 @@ class Settings:
         base_dir = Path.cwd()
         return cls(
             mother_bot_token=os.getenv("MOTHER_BOT_TOKEN", "").strip(),
-            gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip(),
-            gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite").strip(),
+            openrouter_api_key=(
+                os.getenv("OPENROUTER_API_KEY", "").strip()
+                or os.getenv("GEMINI_API_KEY", "").strip()
+            ),
+            openrouter_model=(
+                os.getenv("OPENROUTER_MODEL", "").strip()
+                or os.getenv("GEMINI_MODEL", "").strip()
+                or "google/gemini-2.5-flash-lite"
+            ),
+            openrouter_interaction_model=(
+                os.getenv("OPENROUTER_INTERACTION_MODEL", "").strip()
+                or os.getenv("OPENROUTER_MODEL", "").strip()
+                or "google/gemini-2.5-pro"
+            ),
+            openrouter_coding_model=(
+                os.getenv("OPENROUTER_CODING_MODEL", "").strip()
+                or os.getenv("OPENROUTER_MODEL", "").strip()
+                or "deepseek/deepseek-v4-pro"
+            ),
+            openrouter_base_url=os.getenv(
+                "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
+            ).strip() or "https://openrouter.ai/api/v1",
+            openrouter_app_name=os.getenv("OPENROUTER_APP_NAME", "BotMother").strip()
+            or "BotMother",
+            openrouter_app_url=os.getenv("OPENROUTER_APP_URL", "").strip(),
             db_path=_path_from_env(os.getenv("BOTMOTHER_DB", "./data/botmother.sqlite3"), base_dir),
             workdir=_path_from_env(os.getenv("BOTMOTHER_WORKDIR", "./data/bots"), base_dir),
             owner_ids=_owner_ids(os.getenv("OWNER_IDS")),
@@ -118,8 +146,8 @@ class Settings:
         missing = []
         if not self.mother_bot_token:
             missing.append("MOTHER_BOT_TOKEN")
-        if not self.gemini_api_key:
-            missing.append("GEMINI_API_KEY")
+        if not self.openrouter_api_key:
+            missing.append("OPENROUTER_API_KEY")
         if missing:
             joined = ", ".join(missing)
             raise RuntimeError(f"Missing required environment variables: {joined}")

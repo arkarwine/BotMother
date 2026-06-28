@@ -19,6 +19,7 @@ from botmother.handlers import (
     parse_ask_args,
     parse_bot_id,
     parse_tail_args,
+    strip_question_sentences,
     _remember_user,
 )
 
@@ -208,7 +209,8 @@ class HandlerHelperTests(unittest.TestCase):
 
         text = format_ai_questions(decision)
 
-        self.assertIn(decision.message, text)
+        self.assertIn("Admin ID တွေ ပေးပါ။", text)
+        self.assertNotIn("KPay ကို ဖုန်းနံပါတ်နဲ့ပြမလား", text)
         self.assertIn("Admin IDs?", text)
         self.assertIn("Payment display?", text)
         self.assertNotIn("Suggestions:", text)
@@ -228,9 +230,36 @@ class HandlerHelperTests(unittest.TestCase):
 
         text = format_ai_questions(decision)
 
-        self.assertIn("Could you please clarify a few details?", text)
+        self.assertIn("I will create a complete E-commerce bot for you.", text)
+        self.assertNotIn("Could you please clarify a few details?", text)
         self.assertIn("What product categories will your store sell?", text)
         self.assertIn("Which Telegram user IDs should receive order notifications?", text)
+
+    def test_format_ai_questions_removes_duplicate_question_sentence(self):
+        decision = AIDecision(
+            "questions",
+            "ecommerce bot တစ်ခုတည်ဆောက်ဖို့အတွက် ကုန်ပစ္စည်းစာရင်းနှင့် ငွေပေးချေမှုပုံစံများ လိုအပ်ပါတယ်။ ပထမဦးစွာ သင့်ရဲ့ကုန်ပစ္စည်းစာရင်းတွေကို ဘယ်လိုနည်းလမ်းနဲ့ စီမံခန့်ခွဲချင်ပါသလဲ?",
+            (
+                AIQuestion(
+                    "product_management",
+                    "ကုန်ပစ္စည်းစာရင်းကို ဘယ်လိုစီမံခန့်ခွဲချင်ပါသလဲ?",
+                    (),
+                ),
+            ),
+            None,
+            (),
+        )
+
+        text = format_ai_questions(decision)
+
+        self.assertIn("ecommerce bot", text)
+        self.assertEqual(text.count("ဘယ်လို"), 1)
+        self.assertIn("ကုန်ပစ္စည်းစာရင်းကို ဘယ်လိုစီမံခန့်ခွဲချင်ပါသလဲ?", text)
+
+    def test_strip_question_sentences_keeps_plain_intro(self):
+        text = strip_question_sentences("Ready to build. Which option works best? Send details.")
+
+        self.assertEqual(text, "Ready to build. Send details.")
 
     def test_format_ai_questions_never_drops_questions_for_burmese_preamble(self):
         decision = AIDecision(

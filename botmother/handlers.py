@@ -278,12 +278,26 @@ def question_texts(decision: AIDecision | AIReadinessDecision) -> list[str]:
     return [question.question for question in decision.questions]
 
 
+def strip_question_sentences(message: str) -> str:
+    parts = re.split(r"(?<=[။.!?])\s+", message.strip())
+    kept = []
+    for part in parts:
+        text = part.strip()
+        if not text:
+            continue
+        if "?" in text:
+            continue
+        kept.append(text)
+    return " ".join(kept).strip()
+
+
 def format_ai_questions(decision: AIDecision | AIReadinessDecision) -> str:
     if decision.needs_questions and not decision.questions:
         return "I need a little more detail before building."
     questions = [question.question.strip() for question in decision.questions if question.question.strip()]
     message = decision.message.strip()
     if decision.needs_questions and questions:
+        message = strip_question_sentences(message)
         visible_questions = [question for question in questions if question not in message]
         if message and visible_questions:
             return message + "\n\n" + "\n\n".join(visible_questions)

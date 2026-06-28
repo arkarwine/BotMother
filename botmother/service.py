@@ -9,7 +9,7 @@ from .ai import (
     AIDecision,
     AIQuestion,
     AIReadinessDecision,
-    GeminiCodeGenerator,
+    OpenRouterCodeGenerator,
 )
 from .code_tools import (
     extract_python_code,
@@ -96,7 +96,7 @@ class BotService:
         self,
         settings: Settings,
         db: Database,
-        generator: GeminiCodeGenerator,
+        generator: OpenRouterCodeGenerator,
         runner: ProcessManager,
     ) -> None:
         self.settings = settings
@@ -261,9 +261,16 @@ class BotService:
         token: str,
         user_context: str = "",
     ) -> OperationResult:
-        raw = self.generator.generate_code(prompt, user_context=user_context)
+        coding_brief = self.generator.build_coding_brief(prompt, user_context=user_context)
+        raw = self.generator.generate_code(coding_brief)
         return await self.create_bot_from_code(
-            user_id, chat_id, prompt, token, raw, user_context=user_context
+            user_id,
+            chat_id,
+            prompt,
+            token,
+            raw,
+            coding_context=coding_brief,
+            user_context=user_context,
         )
 
     async def create_bot_from_decision(
@@ -277,13 +284,16 @@ class BotService:
     ) -> OperationResult:
         if decision.type != "code" or not decision.code:
             return OperationResult(False, "AI did not provide code yet.")
+        coding_brief = decision.code
+        raw_code = self.generator.generate_code(coding_brief)
         return await self.create_bot_from_code(
             user_id,
             chat_id,
             prompt,
             token,
-            decision.code,
+            raw_code,
             self._env_dict(decision),
+            coding_context=coding_brief,
             user_context=user_context,
         )
 
@@ -295,6 +305,7 @@ class BotService:
         token: str,
         raw_code: str,
         env_vars: dict[str, str] | None = None,
+        coding_context: str | None = None,
         user_context: str = "",
     ) -> OperationResult:
         token = token.strip()
@@ -343,7 +354,9 @@ class BotService:
             )
 
         raw_code = self._refine_code_for_deploy(
-            prompt, raw_code, env_vars or {}, user_context=user_context
+            coding_context or prompt,
+            raw_code,
+            env_vars or {},
         )
         code = extract_python_code(raw_code)
         validation = validate_generated_code(code)
@@ -509,11 +522,16 @@ class BotService:
         env_vars = self._env_dict(decision)
         existing_env_vars = self.db.get_bot_env_vars(bot_id)
         refinement_env_vars = {**existing_env_vars, **env_vars}
-        raw_code = self._refine_code_for_deploy(
-            f"Edit request: {edit_prompt}",
+        latest_revision = self.db.latest_revision(bot_id)
+        current_code = str(latest_revision["code"]) if latest_revision is not None else ""
+        generated_code = self.generator.edit_code(
+            current_code,
             decision.code,
+        )
+        raw_code = self._refine_code_for_deploy(
+            decision.code,
+            generated_code,
             refinement_env_vars,
-            user_context=user_context,
         )
         code = extract_python_code(raw_code)
         validation = validate_generated_code(code)
@@ -1029,12 +1047,12 @@ class BotService:
         logger.info(
             "Generating revision: bot_id=%s prompt_chars=%s", bot_id, len(prompt)
         )
-        raw = self.generator.generate_code(prompt, user_context=user_context)
+        coding_brief = self.generator.build_coding_brief(prompt, user_context=user_context)
+        raw = self.generator.generate_code(coding_brief)
         raw = self._refine_code_for_deploy(
-            prompt,
+            coding_brief,
             raw,
             self.db.get_bot_env_vars(bot_id),
-            user_context=user_context,
         )
         code = extract_python_code(raw)
         validation = validate_generated_code(code)
