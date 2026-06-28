@@ -64,6 +64,20 @@ TARGET_LABELS = {
     TARGET_CUSTOM: "✏️ Custom List",
 }
 
+PAGE_SIZE = 10
+
+
+def clamp_page(total: int, page: int, page_size: int = PAGE_SIZE) -> int:
+    max_page = max(0, (max(0, total) - 1) // page_size)
+    return max(0, min(page, max_page))
+
+
+def page_slice(rows: list[Any], page: int, page_size: int = PAGE_SIZE) -> tuple[list[Any], int, int]:
+    page = clamp_page(len(rows), page, page_size)
+    start = page * page_size
+    total_pages = max(1, ((len(rows) - 1) // page_size) + 1) if rows else 1
+    return rows[start : start + page_size], page, total_pages
+
 
 def build_application(settings: Any, db: MgmtDatabase):  # type: ignore[return]
     try:
@@ -195,6 +209,19 @@ def build_application(settings: Any, db: MgmtDatabase):  # type: ignore[return]
             ]
         )
 
+    def paged_keyboard(prefix: str, page: int, total_pages: int, extra_rows=None):
+        rows = list(extra_rows or [])
+        if total_pages > 1:
+            nav = []
+            if page > 0:
+                nav.append(InlineKeyboardButton("◀️", callback_data=f"{prefix}:{page - 1}"))
+            nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop"))
+            if page < total_pages - 1:
+                nav.append(InlineKeyboardButton("▶️", callback_data=f"{prefix}:{page + 1}"))
+            rows.append(nav)
+        rows.append([InlineKeyboardButton("🏠 Home", callback_data="nav:home")])
+        return InlineKeyboardMarkup(rows)
+
     def cancel_keyboard():
         return InlineKeyboardMarkup(
             [[InlineKeyboardButton("❌ Cancel", callback_data="nav:cancel")]]
@@ -227,9 +254,10 @@ def build_application(settings: Any, db: MgmtDatabase):  # type: ignore[return]
             ]
         )
 
-    def bots_picker_keyboard(bots: list, action: str = "botstatus"):
+    def bots_picker_keyboard(bots: list, action: str = "botstatus", page: int = 0):
         if not bots:
             return back_home_keyboard()
+        visible_bots, page, total_pages = page_slice(bots, page)
         buttons = [
             [
                 InlineKeyboardButton(
@@ -237,8 +265,16 @@ def build_application(settings: Any, db: MgmtDatabase):  # type: ignore[return]
                     callback_data=f"{action}:{b['id']}",
                 )
             ]
-            for b in bots[:20]
+            for b in visible_bots
         ]
+        if total_pages > 1:
+            nav = []
+            if page > 0:
+                nav.append(InlineKeyboardButton("◀️", callback_data=f"page:bots:{action}:{page - 1}"))
+            nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop"))
+            if page < total_pages - 1:
+                nav.append(InlineKeyboardButton("▶️", callback_data=f"page:bots:{action}:{page + 1}"))
+            buttons.append(nav)
         buttons.append([InlineKeyboardButton("🏠 Home", callback_data="nav:home")])
         return InlineKeyboardMarkup(buttons)
 
@@ -418,9 +454,10 @@ def build_application(settings: Any, db: MgmtDatabase):  # type: ignore[return]
         last = str(row["last_name"] or "").strip()
         return f"@{username}" if username else " ".join(p for p in (first, last) if p) or str(row["user_id"])
 
-    def format_credit_dashboard() -> str:
+    def format_credit_dashboard(page: int = 0) -> str:
         summary = db.credit_summary()
-        accounts = db.list_credit_accounts(10)
+        all_accounts = db.list_credit_accounts(1000)
+        accounts, page, total_pages = page_slice(all_accounts, page)
         ledger = db.recent_credit_ledger(8)
         lines = [
             "<b>💳 Credit Dashboard</b>",
@@ -441,6 +478,8 @@ def build_application(settings: Any, db: MgmtDatabase):  # type: ignore[return]
                 )
         else:
             lines.append("No credit accounts yet.")
+        if all_accounts:
+            lines.append(f"\n<i>Page {page + 1}/{total_pages} · {len(all_accounts)} accounts</i>")
         lines.append("")
         lines.append("<b>Recent ledger</b>")
         if ledger:
@@ -612,7 +651,7 @@ def build_application(settings: Any, db: MgmtDatabase):  # type: ignore[return]
 
     # ─── Bot list ─────────────────────────────────────────────────────────────
 
-    async def bots_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def bots_list(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0) -> None:
         if not await guard(update):
             return
         uid = _user_id(update)
@@ -623,11 +662,14 @@ def build_application(settings: Any, db: MgmtDatabase):  # type: ignore[return]
         else:
             bots = db.list_bots_for_owner(uid)
 
-        text = format_bot_list(bots)
+        visible_bots, page, total_pages = page_slice(bots, page)
+        text = format_bot_list(visible_bots)
+        if bots:
+            text += f"\n\n<i>Page {page + 1}/{total_pages} · {len(bots)} total</i>"
         await edit_or_reply_html(
             update,
             text,
-            reply_markup=bots_picker_keyboard(bots),
+            reply_markup=bots_picker_keyboard(bots, page=page),
         )
 
     # ─── Bot detail + logs ────────────────────────────────────────────────────
@@ -685,17 +727,20 @@ def build_application(settings: Any, db: MgmtDatabase):  # type: ignore[return]
 
     # ─── Users ────────────────────────────────────────────────────────────────
 
-    async def users_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def users_list(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0) -> None:
         if not await guard(update):
             return
         uid = _user_id(update)
         logger.info("Users: user_id=%s", uid)
         users = db.list_all_users()
-        text = format_users_summary(users)
+        visible_users, page, total_pages = page_slice(users, page)
+        text = format_users_summary(visible_users)
+        if users:
+            text += f"\n\n<i>Page {page + 1}/{total_pages} · {len(users)} total</i>"
         await edit_or_reply_html(
             update,
             text,
-            reply_markup=back_home_keyboard(),
+            reply_markup=paged_keyboard("page:users", page, total_pages),
         )
 
     # ─── Admin management ─────────────────────────────────────────────────────
@@ -869,14 +914,20 @@ def build_application(settings: Any, db: MgmtDatabase):  # type: ignore[return]
         )
         return ConversationHandler.END
 
-    async def credits_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def credits_command(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0) -> None:
         if not await guard(update):
             return
         uid = _user_id(update)
         if not _is_admin_role(uid):
             await reply_html(update.effective_message, "🔒 Admins only.")
             return
-        await edit_or_reply_html(update, format_credit_dashboard(), reply_markup=credits_keyboard())
+        accounts = db.list_credit_accounts(1000)
+        _, page, total_pages = page_slice(accounts, page)
+        await edit_or_reply_html(
+            update,
+            format_credit_dashboard(page),
+            reply_markup=paged_keyboard("page:credits", page, total_pages),
+        )
 
     async def usercredits_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await guard(update):
@@ -897,6 +948,81 @@ def build_application(settings: Any, db: MgmtDatabase):  # type: ignore[return]
             update.effective_message,
             format_user_credits(target_id),
             reply_markup=credits_keyboard(),
+        )
+
+    async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await guard(update):
+            return
+        uid = _user_id(update)
+        query = " ".join(context.args).strip().lower()
+        if not query:
+            await reply_html(
+                update.effective_message,
+                "<b>🔎 Search</b>\n\nUse <code>/search text</code> to search bots, users, credits, and broadcast history.",
+                reply_markup=back_home_keyboard(),
+            )
+            return
+        bots = db.list_all_bots() if _is_admin_role(uid) else db.list_bots_for_owner(uid)
+        users = db.list_all_users() if _is_admin_role(uid) else []
+        accounts = db.list_credit_accounts(1000) if _is_admin_role(uid) else []
+        broadcasts = db.list_broadcasts(1000) if _is_admin_role(uid) else []
+
+        def matches(row: Any, keys: tuple[str, ...]) -> bool:
+            return query in " ".join(str(row[key] or "") for key in keys).lower()
+
+        bot_matches_rows = [
+            row for row in bots
+            if matches(row, ("name", "bot_username", "status", "owner_username", "owner_first_name", "owner_last_name"))
+        ][:10]
+        user_matches_rows = [
+            row for row in users
+            if matches(row, ("user_id", "username", "first_name", "last_name"))
+        ][:10]
+        account_matches_rows = [
+            row for row in accounts
+            if matches(row, ("user_id", "username", "first_name", "last_name", "balance"))
+        ][:10]
+        broadcast_matches_rows = [
+            row for row in broadcasts
+            if matches(row, ("target_group", "message_text", "sent_by"))
+        ][:5]
+
+        lines = [
+            "<b>🔎 Search Results</b>",
+            "",
+            f"Query: <code>{escape(query)}</code>",
+            "",
+            "<b>Bots</b>",
+        ]
+        if bot_matches_rows:
+            for bot in bot_matches_rows:
+                lines.append(f"{escape(status_badge(str(bot['status'])))}  <b>{escape(str(bot['name']))}</b>")
+        else:
+            lines.append("No bot matches.")
+        lines.extend(["", "<b>Users</b>"])
+        if user_matches_rows:
+            for user in user_matches_rows:
+                lines.append(f"<code>{user['user_id']}</code>  {escape(user_display(user))}")
+        else:
+            lines.append("No user matches.")
+        lines.extend(["", "<b>Credit Accounts</b>"])
+        if account_matches_rows:
+            for account in account_matches_rows:
+                lines.append(f"<code>{account['user_id']}</code>  {escape(user_display(account))}  <b>{account['balance']}</b>")
+        else:
+            lines.append("No credit matches.")
+        lines.extend(["", "<b>Broadcasts</b>"])
+        if broadcast_matches_rows:
+            for bc in broadcast_matches_rows:
+                preview = str(bc["message_text"] or "")[:60].replace("\n", " ")
+                lines.append(f"{escape(str(bc['target_group']))}: <i>{escape(preview)}</i>")
+        else:
+            lines.append("No broadcast matches.")
+
+        await reply_html(
+            update.effective_message,
+            "\n".join(lines),
+            reply_markup=back_home_keyboard(),
         )
 
     async def grantcredits_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1196,17 +1322,20 @@ def build_application(settings: Any, db: MgmtDatabase):  # type: ignore[return]
 
     # ─── Broadcast history ────────────────────────────────────────────────────
 
-    async def broadcast_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def broadcast_history(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0) -> None:
         if not await guard(update):
             return
         uid = _user_id(update)
         logger.info("Broadcast history: user_id=%s", uid)
-        broadcasts = db.list_broadcasts()
-        text = format_broadcast_history(broadcasts)
+        broadcasts = db.list_broadcasts(1000)
+        visible_broadcasts, page, total_pages = page_slice(broadcasts, page)
+        text = format_broadcast_history(visible_broadcasts)
+        if broadcasts:
+            text += f"\n\n<i>Page {page + 1}/{total_pages} · {len(broadcasts)} total</i>"
         await edit_or_reply_html(
             update,
             text,
-            reply_markup=back_home_keyboard(),
+            reply_markup=paged_keyboard("page:history", page, total_pages),
         )
 
     # ─── Cancel ───────────────────────────────────────────────────────────────
@@ -1305,6 +1434,36 @@ def build_application(settings: Any, db: MgmtDatabase):  # type: ignore[return]
         if data == "nav:history":
             await broadcast_history(update, context)
             return
+        if data.startswith("page:"):
+            parts = data.split(":")
+            if len(parts) >= 3 and parts[1] == "bots":
+                action = parts[2]
+                page = int(parts[3]) if len(parts) > 3 else 0
+                if _is_admin_role(uid):
+                    bots = db.list_all_bots()
+                else:
+                    bots = db.list_bots_for_owner(uid)
+                visible_bots, page, total_pages = page_slice(bots, page)
+                text = format_bot_list(visible_bots)
+                if bots:
+                    text += f"\n\n<i>Page {page + 1}/{total_pages} · {len(bots)} total</i>"
+                await edit_or_reply_html(
+                    update,
+                    text,
+                    reply_markup=bots_picker_keyboard(bots, action=action, page=page),
+                )
+                return
+            if len(parts) >= 3 and parts[1] == "users":
+                await users_list(update, context, page=int(parts[2]))
+                return
+            if len(parts) >= 3 and parts[1] == "credits":
+                await credits_command(update, context, page=int(parts[2]))
+                return
+            if len(parts) >= 3 and parts[1] == "history":
+                await broadcast_history(update, context, page=int(parts[2]))
+                return
+        if data == "noop":
+            return
         if data == "nav:cancel":
             context.user_data.clear()
             await edit_or_reply_html(
@@ -1379,6 +1538,7 @@ def build_application(settings: Any, db: MgmtDatabase):  # type: ignore[return]
             BotCommand("start", "Home menu"),
             BotCommand("dashboard", "System dashboard"),
             BotCommand("bots", "List child bots"),
+            BotCommand("search", "Search management data"),
             BotCommand("logs", "View bot logs"),
             BotCommand("stats", "Platform statistics"),
             BotCommand("users", "List users"),
@@ -1461,6 +1621,7 @@ def build_application(settings: Any, db: MgmtDatabase):  # type: ignore[return]
     application.add_handler(CommandHandler("dashboard", dashboard))
     application.add_handler(CommandHandler("stats", full_stats))
     application.add_handler(CommandHandler("bots", bots_list))
+    application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("logs", logs_command))
     application.add_handler(CommandHandler("users", users_list))
     application.add_handler(CommandHandler("credits", credits_command))

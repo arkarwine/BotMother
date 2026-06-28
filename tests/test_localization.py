@@ -13,8 +13,8 @@ class LocalizationTests(unittest.TestCase):
         self.assertIn("ရှာမတွေ့", t("bot_not_found", locale="my"))
         self.assertIn("Bot အသစ်", t("button.new_bot", locale="my"))
 
-    def test_unknown_locale_falls_back_to_english(self):
-        self.assertIn("Bot not found", t("bot_not_found", locale="fr"))
+    def test_unknown_locale_falls_back_to_default_myanmar(self):
+        self.assertIn("ရှာမတွေ့", t("bot_not_found", locale="fr"))
 
 
 if __name__ == "__main__":

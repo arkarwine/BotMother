@@ -65,6 +65,8 @@ BOT_TEMPLATE_PROMPTS = {
     "other": "Mode: custom bot. Follow the user's prompt and apply sensible complete-bot defaults.",
 }
 
+BOT_LIST_PAGE_SIZE = 10
+
 
 def apply_bot_template(prompt: str, template: str | None) -> str:
     mode = template if template in BOT_TEMPLATE_PROMPTS else "other"
@@ -161,6 +163,14 @@ def format_bot_list(rows: list[Any], locale: str = "en") -> str:
     return "\n".join(lines)
 
 
+def format_bot_page(rows: list[Any], page: int = 0, locale: str = "en") -> tuple[str, int]:
+    visible_rows, page, total_pages = page_slice(rows, page)
+    text = format_bot_list(visible_rows, locale)
+    if rows:
+        text += f"\n\n<i>Page {page + 1}/{total_pages} · {len(rows)} total</i>"
+    return text, page
+
+
 def format_bot_status(row: Any) -> str:
     return (
         f"<b>📦 {escape(bot_title(row))}</b>\n\n"
@@ -221,6 +231,32 @@ def chunk_text(text: str, chunk_size: int = 3200) -> list[str]:
     ]
 
 
+def clamp_page(total: int, page: int, page_size: int = BOT_LIST_PAGE_SIZE) -> int:
+    max_page = max(0, (max(0, total) - 1) // page_size)
+    return max(0, min(page, max_page))
+
+
+def page_slice(rows: list[Any], page: int, page_size: int = BOT_LIST_PAGE_SIZE) -> tuple[list[Any], int, int]:
+    page = clamp_page(len(rows), page, page_size)
+    start = page * page_size
+    return rows[start : start + page_size], page, max(1, ((len(rows) - 1) // page_size) + 1) if rows else 1
+
+
+def bot_matches(row: Any, query: str) -> bool:
+    haystack = " ".join(
+        str(row_value(row, key, "") or "")
+        for key in (
+            "name",
+            "bot_username",
+            "status",
+            "owner_username",
+            "owner_first_name",
+            "owner_last_name",
+        )
+    ).lower()
+    return query.lower() in haystack
+
+
 def question_texts(decision: AIDecision | AIReadinessDecision) -> list[str]:
     return [question.question for question in decision.questions]
 
@@ -265,7 +301,7 @@ def locale_for_update(update: Any) -> str:
     user_id = getattr(user, "id", None)
     if user_id is not None and int(user_id) in USER_LOCALE_CACHE:
         return USER_LOCALE_CACHE[int(user_id)]
-    return normalize_locale(getattr(user, "language_code", None))
+    return normalize_locale(None)
 
 
 def tr(update: Any, key: str, **values: Any) -> str:
@@ -296,6 +332,9 @@ def user_context_for_ai(update: Any) -> str:
         f"Last name: {getattr(user, 'last_name', '') or 'none'}",
         f"Language code: {getattr(user, 'language_code', None) or 'unknown'}",
         f"BotMother locale: {locale_for_update(update)}",
+        "AI response language: Myanmar/Burmese"
+        if locale_for_update(update) == "my"
+        else "AI response language: English",
         f"Is bot: {getattr(user, 'is_bot', False)}",
     ]
     if chat is not None:
@@ -743,17 +782,43 @@ def build_application(token: str, db: Database, service: BotService):
             ]
         )
 
-    def bots_keyboard(rows: list[Any], action: str = "status", show_back: bool = False, locale: str = "en"):
+    def bots_keyboard(
+        rows: list[Any],
+        action: str = "status",
+        show_back: bool = False,
+        locale: str = "en",
+        page: int = 0,
+        pager_prefix: str = "bots_page",
+    ):
         if not rows:
             return empty_state_keyboard(locale)
+        visible_rows, page, total_pages = page_slice(rows, page)
         buttons = [
             [
                 InlineKeyboardButton(
                     compact_bot_label(row), callback_data=f"{action}:{row['id']}"
                 )
             ]
-            for row in rows[:20]
+            for row in visible_rows
         ]
+        if total_pages > 1:
+            nav = []
+            if page > 0:
+                nav.append(
+                    InlineKeyboardButton(
+                        "◀️",
+                        callback_data=f"{pager_prefix}:{action}:{page - 1}",
+                    )
+                )
+            nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop"))
+            if page < total_pages - 1:
+                nav.append(
+                    InlineKeyboardButton(
+                        "▶️",
+                        callback_data=f"{pager_prefix}:{action}:{page + 1}",
+                    )
+                )
+            buttons.append(nav)
         if show_back:
             buttons.append([InlineKeyboardButton(t("button.my_bots", locale=locale), callback_data="nav:bots")])
         return InlineKeyboardMarkup(buttons)
@@ -1230,10 +1295,37 @@ def build_application(token: str, db: Database, service: BotService):
         await service.refresh_missing_bot_usernames_for(user_id)
         rows = service.list_bots_for(user_id)
         logger.info("Command /bots: user_id=%s count=%s", user_id, len(rows))
+        text, page = format_bot_page(rows, locale=locale_for_update(update))
         await reply_html(
             update.effective_message,
-            format_bot_list(rows, locale_for_update(update)),
-            reply_markup=bots_keyboard(rows, locale=locale_for_update(update)),
+            text,
+            reply_markup=bots_keyboard(rows, locale=locale_for_update(update), page=page),
+        )
+
+    async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = _remember_user(db, update)
+        query = " ".join(context.args).strip()
+        logger.info("Command /search: user_id=%s query=%r", user_id, query)
+        if not query:
+            await reply_html(
+                update.effective_message,
+                "<b>🔎 Search</b>\n\nSend <code>/search text</code> to find bots by name, username, status, or owner.",
+                reply_markup=keyboard_for_user(user_id),
+            )
+            return
+        rows = [row for row in service.list_bots_for(user_id) if bot_matches(row, query)]
+        context.user_data["last_search_query"] = query
+        page_text, page = format_bot_page(rows, locale=locale_for_update(update))
+        await reply_html(
+            update.effective_message,
+            f"<b>🔎 Search results</b>\n\nQuery: <code>{escape(query)}</code>\nMatches: <code>{len(rows)}</code>\n\n"
+            + page_text,
+            reply_markup=bots_keyboard(
+                rows,
+                locale=locale_for_update(update),
+                page=page,
+                pager_prefix="search_page",
+            ),
         )
 
     async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1243,10 +1335,11 @@ def build_application(token: str, db: Database, service: BotService):
         if bot_id is None:
             await service.refresh_missing_bot_usernames_for(user_id)
             rows = service.list_bots_for(user_id)
+            text, page = format_bot_page(rows, locale=locale_for_update(update))
             await reply_html(
                 update.effective_message,
-                format_bot_list(rows, locale_for_update(update)),
-                reply_markup=bots_keyboard(rows, locale=locale_for_update(update)),
+                text,
+                reply_markup=bots_keyboard(rows, locale=locale_for_update(update), page=page),
             )
             return
         row = service.get_accessible_bot(user_id, bot_id)
@@ -1310,10 +1403,10 @@ def build_application(token: str, db: Database, service: BotService):
             await reply_html(update.effective_message, bot_not_found_text(update))
             return ConversationHandler.END
         title = escape(bot_title(row))
+        context.user_data["ask_user_context"] = user_context_for_ai(update)
         if question:
             return await answer_bot_question(update, context, user_id, bot_id, question)
         context.user_data["ask_bot_id"] = bot_id
-        context.user_data["ask_user_context"] = user_context_for_ai(update)
         await reply_html(
             update.effective_message,
             format_paid_action_intro(
@@ -1352,7 +1445,12 @@ def build_application(token: str, db: Database, service: BotService):
             update.effective_message,
             tr(update, "ask.reading"),
         )
-        result = service.ask_bot(user_id, bot_id, question)
+        result = service.ask_bot(
+            user_id,
+            bot_id,
+            question,
+            user_context=str(context.user_data.get("ask_user_context", "")),
+        )
         logger.info(
             "Ask bot result: user_id=%s bot_id=%s ok=%s", user_id, bot_id, result.ok
         )
@@ -1392,7 +1490,11 @@ def build_application(token: str, db: Database, service: BotService):
             return
         message = f"<b>{escape(title)}</b>"
         reply_markup = bots_keyboard(
-            rows, action, show_back=False, locale=locale_for_update(update)
+            rows,
+            action,
+            show_back=False,
+            locale=locale_for_update(update),
+            pager_prefix="pick_page",
         )
         if edit:
             await edit_or_reply_html(update, message, reply_markup=reply_markup)
@@ -1594,10 +1696,51 @@ def build_application(token: str, db: Database, service: BotService):
         if data == "nav:bots":
             await service.refresh_missing_bot_usernames_for(user_id)
             rows = service.list_bots_for(user_id)
+            text, page = format_bot_page(rows, locale=locale_for_update(update))
             await edit_or_reply_html(
                 update,
-                format_bot_list(rows, locale_for_update(update)),
-                reply_markup=bots_keyboard(rows, locale=locale_for_update(update)),
+                text,
+                reply_markup=bots_keyboard(rows, locale=locale_for_update(update), page=page),
+            )
+            return
+        if data.startswith("bots_page:"):
+            _, action, raw_page = data.split(":", 2)
+            rows = service.list_bots_for(user_id)
+            text, page = format_bot_page(
+                rows, page=int(raw_page), locale=locale_for_update(update)
+            )
+            await edit_or_reply_html(
+                update,
+                text,
+                reply_markup=bots_keyboard(
+                    rows,
+                    action=action,
+                    locale=locale_for_update(update),
+                    page=page,
+                    pager_prefix="bots_page",
+                ),
+            )
+            return
+        if data.startswith("search_page:"):
+            _, action, raw_page = data.split(":", 2)
+            search_query = str(context.user_data.get("last_search_query", "")).strip()
+            rows = service.list_bots_for(user_id)
+            if search_query:
+                rows = [row for row in rows if bot_matches(row, search_query)]
+            text, page = format_bot_page(
+                rows, page=int(raw_page), locale=locale_for_update(update)
+            )
+            await edit_or_reply_html(
+                update,
+                f"<b>🔎 Search results</b>\n\nQuery: <code>{escape(search_query or 'all')}</code>\nMatches: <code>{len(rows)}</code>\n\n"
+                + text,
+                reply_markup=bots_keyboard(
+                    rows,
+                    action=action,
+                    locale=locale_for_update(update),
+                    page=page,
+                    pager_prefix="search_page",
+                ),
             )
             return
         if data == "nav:id":
@@ -1655,6 +1798,34 @@ def build_application(token: str, db: Database, service: BotService):
             await choose_bot_for_action(
                 update, action, titles.get(action, "Choose a bot:"), edit=True
             )
+            return
+        if data.startswith("pick_page:"):
+            _, action, raw_page = data.split(":", 2)
+            titles = {
+                "status": tr(update, "choose.status"),
+                "ask": tr(update, "choose.ask"),
+                "edit": tr(update, "choose.edit"),
+                "revise": tr(update, "choose.revise"),
+                "tail": tr(update, "choose.tail"),
+                "restart": tr(update, "choose.restart"),
+                "stop": tr(update, "choose.stop"),
+                "autofix": tr(update, "choose.autofix"),
+                "delete_confirm": tr(update, "choose.delete"),
+            }
+            rows = service.list_bots_for(user_id)
+            await edit_or_reply_html(
+                update,
+                f"<b>{escape(titles.get(action, 'Choose a bot:'))}</b>",
+                reply_markup=bots_keyboard(
+                    rows,
+                    action=action,
+                    locale=locale_for_update(update),
+                    page=int(raw_page),
+                    pager_prefix="pick_page",
+                ),
+            )
+            return
+        if data == "noop":
             return
 
         if ":" not in data:
@@ -2138,6 +2309,7 @@ def build_application(token: str, db: Database, service: BotService):
                 BotCommand("credits", "Show your credit balance"),
                 BotCommand("newbot", "Create and launch a child bot"),
                 BotCommand("bots", "List your child bots"),
+                BotCommand("search", "Search your child bots"),
                 BotCommand("status", "Show bot status, or list all bots"),
                 BotCommand("tail", "Show child bot logs"),
                 BotCommand("ask", "Ask about a child bot"),
@@ -2307,6 +2479,7 @@ def build_application(token: str, db: Database, service: BotService):
     )
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(CommandHandler("bots", bots))
+    application.add_handler(CommandHandler("search", search))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("tail", tail))
     application.add_handler(CommandHandler("logs", tail))

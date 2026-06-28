@@ -12,6 +12,7 @@ The generated child bot is raw standalone Python. There is no user-facing schema
 - SQLite state for users, bots, revisions, and recent logs.
 - Commands for create, examples/help, AI-guided prompt edit, ask, start, stop, restart, delete, status, identity, health, and tail/logs.
 - Button-first manager UX with a persistent reply keyboard and inline bot action buttons.
+- Paginated bot/admin lists and simple search commands.
 - AI can ask follow-up questions before creating or editing a bot.
 - AI runs a final essential-data readiness check before asking for the child bot token.
 - AI runs several raw-Python refinement passes before deployment.
@@ -90,8 +91,9 @@ Typed commands remain available as a fallback and for power users:
 - `/start` - show basic help.
 - `/help`, `/commands`, `/usage` - show the category help menu.
 - `/examples` - show copy-ready bot prompt examples.
-- `/language` - choose English or Myanmar for BotMother menus and messages.
+- `/language` - choose English or Myanmar for BotMother menus and messages. Myanmar is the default until the user chooses another language.
 - `/credits` - show credit balance and costs.
+- `/search <text>` - search your visible child bots by name, username, status, or owner.
 - `/newbot` - create and launch a child bot.
 - `/bots` - list your bots. Owners see all bots.
 - `/status [id]` - show one child bot status, or open the bot list when no id is given.
@@ -142,7 +144,7 @@ BotMother always injects `BOT_TOKEN`, `BOT_DB_PATH`, `PATH`, `PYTHONUNBUFFERED`,
 
 ## Localization
 
-Manager UI text is loaded from JSON locale files under `botmother/locales/`. English and Myanmar are included:
+Manager UI text is loaded from JSON locale files under `botmother/locales/`. Myanmar is the default, and English is included:
 
 ```text
 botmother/locales/en.json
@@ -152,6 +154,8 @@ botmother/locales/my.json
 Generated bots default to English unless the user explicitly asks for another language or multilingual support. BotMother no longer asks a separate localization question before planning.
 
 Users can change the manager language from the `🌐 Language` inline button or `/language`. The choice is stored per Telegram user in SQLite and overrides Telegram's `language_code`.
+
+AI planning, follow-up questions, readiness checks, Ask Bot answers, and generated child bot UI text follow the user’s selected BotMother language. If the user has not chosen a language, the AI uses Myanmar/Burmese by default.
 
 ## Security Notes
 
@@ -269,6 +273,7 @@ Unauthorized users see an "Access Denied" screen with no further information.
 - `/dashboard` — System overview card (users, bots, running/crashed breakdown, health bar)
 - `/stats` — Full statistics with per-status breakdown
 - `/bots` — Paginated child bot list with status badges; tap for detail view
+- `/search <text>` — Search bots, users, credit accounts, and broadcast history
 - `/logs [id]` — View recent stdout/stderr for a child bot; opens a picker if no ID
 - `/users` — Total user count + recent user list
 - `/credits` — Credit dashboard and recent ledger activity

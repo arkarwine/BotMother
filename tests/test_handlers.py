@@ -66,13 +66,13 @@ class HandlerHelperTests(unittest.TestCase):
         bot_id, limit, error = parse_tail_args([])
         self.assertIsNone(bot_id)
         self.assertEqual(limit, 30)
-        self.assertIn("Logs", error)
+        self.assertIn("bot", error)
 
     def test_parse_tail_args_rejects_bad_limit(self):
         bot_id, limit, error = parse_tail_args(["12", "nope"])
         self.assertEqual(bot_id, 12)
         self.assertEqual(limit, 30)
-        self.assertIn("number", error)
+        self.assertTrue(error)
 
     def test_parse_ask_args_accepts_inline_question(self):
         bot_id, question, error = parse_ask_args(["12", "what", "does", "it", "do?"])
@@ -90,14 +90,14 @@ class HandlerHelperTests(unittest.TestCase):
         bot_id, question, error = parse_ask_args([])
         self.assertIsNone(bot_id)
         self.assertEqual(question, "")
-        self.assertIn("Ask Bot", error)
+        self.assertIn("Bot", error)
 
     def test_format_empty_bot_list(self):
-        self.assertIn("New Bot", format_bot_list([]))
+        self.assertIn("Bot", format_bot_list([]))
 
     def test_help_category_text(self):
-        self.assertIn("Create", help_category_text("create"))
-        self.assertIn("Buttons", help_category_text("fallback"))
+        self.assertTrue(help_category_text("create"))
+        self.assertTrue(help_category_text("fallback"))
         self.assertIn("BotMother", help_category_text("unknown"))
 
     def test_format_bot_list_uses_bot_username(self):
@@ -213,6 +213,12 @@ class HandlerHelperTests(unittest.TestCase):
             user_id = _remember_user(db, update)
 
         self.assertEqual(user_id, FakeUser.id)
+        self.assertEqual(locale_for_update(update), "my")
+
+    def test_locale_defaults_to_myanmar_until_user_selects_language(self):
+        USER_LOCALE_CACHE.clear()
+        update = SlotUpdate()
+
         self.assertEqual(locale_for_update(update), "my")
 
 

@@ -31,7 +31,7 @@ PROMPT_ENHANCEMENT_LAYERS = (
 PRODUCT_COMPLETENESS_DEFAULTS = (
     "Default to a complete child bot: polished /start and help, command menu registration, "
     "button-first navigation with back/cancel/confirm states, SQLite persistence where useful, "
-    "admin tools when implied, safe validation/errors, and English text unless the user asks otherwise."
+    "admin tools when implied, safe validation/errors, and UI text matching the Requester context BotMother locale unless the user asks otherwise."
 )
 
 
@@ -51,7 +51,7 @@ UX/code requirements:
 - Create required SQLite tables in BOT_DB_PATH.
 - Add application.add_error_handler(...) that logs exceptions and sends a friendly fallback when possible.
 - Prefer ParseMode.HTML plus html.escape for dynamic text; if using MarkdownV2, escape all dynamic text. No legacy Markdown or unescaped user content.
-- Use English by default.
+- Language: use the Requester context BotMother locale for all generated child bot UI text. If BotMother locale is "my", write user-facing text in Myanmar/Burmese. If it is "en", write English. If the user explicitly asks for another language or multilingual support, follow that request.
 
 Forbidden: subprocess, socket, ctypes, importlib, multiprocessing; eval, exec, compile, __import__, os.system, os.remove/unlink/rmdir/rename/replace, shutil.move/rmtree.
 """
@@ -79,7 +79,7 @@ First decide whether enough detail exists. Return exactly one JSON object:
 Rules:
 - JSON only. No Markdown/prose.
 - Ask material questions when behavior, storage, commands, admin policy, schedules, external services, or env vars are required and unclear.
-- Default to English.
+- Use the Requester context BotMother locale for every user-facing JSON message and question. If BotMother locale is "my", write Myanmar/Burmese. If it is "en", write English.
 - Ask one question at a time.
 - For type "questions", "questions" is mandatory and must contain the exact concrete user-facing question(s).
 - Do not put only a preamble in "message". If "message" asks for more details, it must also include the concrete question text from "questions".
@@ -92,7 +92,7 @@ Rules:
 
 ASK_SYSTEM_PROMPT = """Answer the owner about one generated child bot using the provided prompt, status, source, env names, and logs.
 
-Be concise, practical, same language/style when possible. Do not reveal tokens, env values, or raw source unless asked for a tiny snippet. If context is insufficient, say what is unknown. For behavior changes, suggest Edit Bot. Do not claim unsupported capabilities.
+Be concise, practical, and answer in the BotMother locale from the provided context. If BotMother locale is "my", answer in Myanmar/Burmese. If it is "en", answer in English. Do not reveal tokens, env values, or raw source unless asked for a tiny snippet. If context is insufficient, say what is unknown. For behavior changes, suggest Edit Bot. Do not claim unsupported capabilities.
 """
 
 
@@ -113,6 +113,7 @@ Return exactly one JSON object:
 
 Rules:
 - JSON only. No Markdown/prose.
+- Use the Requester context BotMother locale for every user-facing JSON message and question. If BotMother locale is "my", write Myanmar/Burmese. If it is "en", write English.
 - Check only missing essentials required for the requested bot to run usefully: required auth/config, admins/operators, payment/contact info, or core workflow data.
 - Do not ask optional preference/polish questions.
 - Never ask for Telegram/BotFather token or runtime env vars ({", ".join(sorted(RESERVED_ENV_NAMES))}); BotMother injects them.

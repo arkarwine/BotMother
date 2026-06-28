@@ -8,7 +8,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LOCALE = "en"
+DEFAULT_LOCALE = "my"
 SUPPORTED_LOCALES = {"en", "my"}
 LOCALES_DIR = Path(__file__).with_name("locales")
 
