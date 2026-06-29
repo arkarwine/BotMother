@@ -6,7 +6,7 @@ import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -544,6 +544,22 @@ def _usage_from_response(data: dict[str, Any]) -> AIUsage | None:
     return parsed if parsed.has_counts else None
 
 
+def _delta_content(choice: dict[str, Any]) -> str:
+    delta = choice.get("delta")
+    if isinstance(delta, dict):
+        content = delta.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return _extract_message_content({"content": content})
+    if isinstance(choice.get("text"), str):
+        return str(choice["text"])
+    message = choice.get("message")
+    if isinstance(message, dict):
+        return _extract_message_content(message)
+    return ""
+
+
 def _empty_response_diagnostics(
     data: dict[str, Any], choice: dict[str, Any], message: dict[str, Any], model: str
 ) -> dict[str, Any]:
@@ -772,6 +788,153 @@ class OpenRouterCodeGenerator:
                 str(data.get("model")) if data.get("model") is not None else None
             ),
         )
+
+    def _chat_stream_result(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        model: str | None = None,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> AITextResult:
+        if type(self)._chat is not OpenRouterCodeGenerator._chat:
+            result = self._chat_result(system_prompt, user_prompt, model=model)
+            if result.text and on_delta is not None:
+                on_delta(result.text)
+            return result
+
+        resolved_model = model or self.model
+        payload: dict[str, Any] = {
+            "model": resolved_model,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        payload.update(self._build_extra_payload(resolved_model))
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "X-Title": self.app_name,
+            "X-OpenRouter-Metadata": "enabled",
+        }
+        if self.app_url:
+            headers["HTTP-Referer"] = self.app_url
+
+        logger.debug(
+            "OpenRouter streaming request: model=%s role=%s max_completion_tokens=%s reasoning=%s system_chars=%s user_chars=%s",
+            resolved_model,
+            self._model_role(resolved_model),
+            payload.get("max_completion_tokens"),
+            payload.get("reasoning"),
+            len(system_prompt),
+            len(user_prompt),
+        )
+        request = urllib.request.Request(
+            f"{self.base_url}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+
+        chunks: list[str] = []
+        usage: AIUsage | None = None
+        finish_reason: str | None = None
+        native_finish_reason: str | None = None
+        response_id: str | None = None
+        returned_model: str | None = None
+        event_count = 0
+        delta_count = 0
+        try:
+            with urllib.request.urlopen(
+                request, timeout=self.request_timeout_seconds
+            ) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line or line.startswith(":") or not line.startswith("data:"):
+                        continue
+                    data_text = line[5:].strip()
+                    if data_text == "[DONE]":
+                        break
+                    try:
+                        event = json.loads(data_text)
+                    except json.JSONDecodeError:
+                        logger.debug(
+                            "Ignoring malformed OpenRouter stream event: %s",
+                            data_text[:500],
+                        )
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    event_count += 1
+                    if event.get("error"):
+                        raise RuntimeError(
+                            "OpenRouter stream error: "
+                            + _json_preview(event.get("error"), limit=800)
+                        )
+                    if response_id is None and event.get("id") is not None:
+                        response_id = str(event.get("id"))
+                    if returned_model is None and event.get("model") is not None:
+                        returned_model = str(event.get("model"))
+                    event_usage = _usage_from_response(event)
+                    if event_usage is not None:
+                        usage = event_usage
+                    choices = event.get("choices", [])
+                    if not isinstance(choices, list):
+                        continue
+                    for choice in choices:
+                        if not isinstance(choice, dict):
+                            continue
+                        if choice.get("finish_reason") is not None:
+                            finish_reason = str(choice.get("finish_reason"))
+                        if choice.get("native_finish_reason") is not None:
+                            native_finish_reason = str(
+                                choice.get("native_finish_reason")
+                            )
+                        delta = _delta_content(choice)
+                        if not delta:
+                            continue
+                        delta_count += 1
+                        chunks.append(delta)
+                        if on_delta is not None:
+                            on_delta(delta)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:1000]
+            logger.error(
+                "OpenRouter streaming HTTP error: status=%s body=%s", exc.code, detail
+            )
+            raise RuntimeError(
+                f"OpenRouter streaming request failed with HTTP {exc.code}: {detail}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            logger.error("OpenRouter streaming request failed: %s", exc)
+            raise RuntimeError(f"OpenRouter streaming request failed: {exc}") from exc
+
+        text = "".join(chunks)
+        result = AITextResult(
+            text,
+            usage=usage,
+            finish_reason=finish_reason,
+            native_finish_reason=native_finish_reason,
+            response_id=response_id,
+            requested_model=resolved_model,
+            returned_model=returned_model,
+        )
+        logger.debug(
+            "OpenRouter streaming response: id=%s requested_model=%s returned_model=%s finish_reason=%s events=%s deltas=%s content_chars=%s usage=%s",
+            response_id,
+            resolved_model,
+            returned_model,
+            finish_reason,
+            event_count,
+            delta_count,
+            len(text),
+            usage,
+        )
+        return result
 
     def _generate_json_text(self, prompt: str) -> str:
         text = self._chat(
@@ -1126,6 +1289,14 @@ class OpenRouterCodeGenerator:
     def answer_bot_question_result(
         self, bot_context: str, question: str
     ) -> AITextResult:
+        return self.answer_bot_question_streaming_result(bot_context, question)
+
+    def answer_bot_question_streaming_result(
+        self,
+        bot_context: str,
+        question: str,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> AITextResult:
         logger.info(
             "Answering bot question: model=%s context_chars=%s question_chars=%s",
             self.interaction_model,
@@ -1135,7 +1306,16 @@ class OpenRouterCodeGenerator:
         prompt = (
             f"Bot context:\n{bot_context.strip()}\n\nUser question:\n{question.strip()}"
         )
-        result = self._chat_result(ASK_SYSTEM_PROMPT, prompt, model=self.interaction_model)
+        result = self._chat_stream_result(
+            ASK_SYSTEM_PROMPT,
+            prompt,
+            model=self.interaction_model,
+            on_delta=on_delta,
+        )
+        if result.finished_by_token_limit:
+            raise AIResponseError(
+                "The answer stopped because the model hit its token limit. Try asking a narrower question."
+            )
         if result.text and result.text.strip():
             logger.info("OpenRouter returned bot answer: chars=%s", len(result.text))
             return AITextResult(

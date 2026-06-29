@@ -4,6 +4,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from .ai import (
     AIResponseError,
@@ -772,6 +773,16 @@ class BotService:
     def ask_bot(
         self, user_id: int, bot_id: int, question: str, user_context: str = ""
     ) -> AskResult:
+        return self.ask_bot_streaming(user_id, bot_id, question, user_context=user_context)
+
+    def ask_bot_streaming(
+        self,
+        user_id: int,
+        bot_id: int,
+        question: str,
+        user_context: str = "",
+        on_delta: Callable[[str], None] | None = None,
+    ) -> AskResult:
         question = question.strip()
         if not question:
             return AskResult(False, "Ask a question about the bot.", bot_id)
@@ -800,7 +811,7 @@ class BotService:
                     f"{user_context.strip()}\n\n"
                     + context
                 )
-            answered = self._answer_bot_question_result(context, question)
+            answered = self._answer_bot_question_result(context, question, on_delta)
             answer = answered.text
             answer = self._redact_context(
                 answer, str(bot["token"]), self.db.get_bot_env_vars(bot_id)
@@ -936,12 +947,24 @@ class BotService:
         return AITextResult(self.generator.edit_code(current_code, edit_brief))
 
     def _answer_bot_question_result(
-        self, bot_context: str, question: str
+        self,
+        bot_context: str,
+        question: str,
+        on_delta: Callable[[str], None] | None = None,
     ) -> AITextResult:
+        answer_result = getattr(self.generator, "answer_bot_question_streaming_result", None)
+        if callable(answer_result):
+            return answer_result(bot_context, question, on_delta=on_delta)
         answer_result = getattr(self.generator, "answer_bot_question_result", None)
         if callable(answer_result):
-            return answer_result(bot_context, question)
-        return AITextResult(self.generator.answer_bot_question(bot_context, question))
+            result = answer_result(bot_context, question)
+            if result.text and on_delta is not None:
+                on_delta(result.text)
+            return result
+        answer = self.generator.answer_bot_question(bot_context, question)
+        if answer and on_delta is not None:
+            on_delta(answer)
+        return AITextResult(answer)
 
     def _bot_question_context(self, bot_id: int, bot, revision) -> str:
         env_names = sorted(self.db.get_bot_env_vars(bot_id))

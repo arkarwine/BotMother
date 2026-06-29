@@ -181,7 +181,7 @@ BotMother uses OpenRouter and can route different AI jobs to different models:
 
 For New Bot/Edit/Revise, the interaction model first turns the user's request, answers, locale, and relevant requester context into a full English implementation prompt. The coding model receives that Gemini-written prompt instead of raw chat text, so it still gets complete translated context without reading the original conversation directly.
 
-Long AI operations use Telegram Bot API draft streaming via `sendMessageDraft` / `python-telegram-bot`'s `send_message_draft`. The live draft shows status, elapsed time, and token budget while the AI works, then BotMother sends or edits the final persistent result. Generated Python code is not streamed into chat.
+Long AI operations use Telegram Bot API draft streaming via `sendMessageDraft` / `python-telegram-bot`'s `send_message_draft`. Ask Bot also streams OpenRouter SSE chunks into the Telegram draft as the answer is generated. Planner/readiness calls still wait for complete strict JSON before showing the final message, and generated Python code is not streamed into chat.
 
 The default performance/price split is:
 

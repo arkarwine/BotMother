@@ -59,6 +59,16 @@ class FakeHTTPResponseWithBody(FakeHTTPResponse):
         self.body = body
 
 
+class FakeStreamingHTTPResponse(FakeHTTPResponse):
+    def __init__(self, lines):
+        self.lines = [
+            line if isinstance(line, bytes) else line.encode("utf-8") for line in lines
+        ]
+
+    def __iter__(self):
+        return iter(self.lines)
+
+
 class AIDecisionTests(unittest.TestCase):
     def test_openrouter_chat_posts_openai_compatible_payload(self):
         generator = OpenRouterCodeGenerator(
@@ -145,6 +155,32 @@ class AIDecisionTests(unittest.TestCase):
                 generator.generate_code_result("make a huge bot")
 
         self.assertIn("token limit", str(caught.exception))
+
+    def test_streaming_answer_parses_sse_chunks_and_usage(self):
+        generator = OpenRouterCodeGenerator(api_key="sk-test", model="test-model")
+        lines = [
+            'data: {"id":"abc","model":"test-model","choices":[{"delta":{"content":"Hel"}}]}\n\n',
+            'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n',
+            'data: {"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5},"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+            "data: [DONE]\n\n",
+        ]
+        deltas = []
+
+        with patch(
+            "urllib.request.urlopen", return_value=FakeStreamingHTTPResponse(lines)
+        ) as mocked:
+            result = generator.answer_bot_question_streaming_result(
+                "Bot context", "Question?", on_delta=deltas.append
+            )
+
+        self.assertEqual(result.text, "Hello")
+        self.assertEqual(deltas, ["Hel", "lo"])
+        self.assertIsNotNone(result.usage)
+        self.assertEqual(result.usage.total_tokens, 5)
+        request = mocked.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertTrue(payload["stream"])
+        self.assertEqual(payload["stream_options"], {"include_usage": True})
 
     def test_empty_json_response_falls_back_instead_of_crashing(self):
         generator = make_generator(["", "", ""])

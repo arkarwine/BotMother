@@ -1026,30 +1026,27 @@ def build_application(token: str, db: Database, service: BotService):
             tokens=progress_tokens_html(update, max_tokens),
         )
 
-    async def send_progress_draft(
+    def draft_preview_text(text: str, limit: int = 3900) -> str:
+        stripped = text.strip()
+        if len(stripped) <= limit:
+            return stripped
+        return "...\n" + stripped[-limit:]
+
+    async def send_plain_draft(
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
         title_key: str,
-        detail_key: str,
-        elapsed_seconds: int,
-        max_tokens: int | None = None,
+        text: str,
     ) -> bool:
         try:
             await context.bot.send_message_draft(
                 chat_id=_chat_id(update),
                 draft_id=progress_draft_id(update, title_key),
-                text=progress_text(
-                    update,
-                    tr(update, title_key),
-                    tr(update, detail_key),
-                    elapsed_seconds,
-                    max_tokens=max_tokens,
-                ),
-                parse_mode=ParseMode.HTML,
+                text=draft_preview_text(text),
             )
             return True
         except Exception:
-            logger.debug("Telegram message draft progress failed", exc_info=True)
+            logger.debug("Telegram plain draft streaming failed", exc_info=True)
             return False
 
     async def run_with_progress(
@@ -1065,30 +1062,11 @@ def build_application(token: str, db: Database, service: BotService):
         loop = asyncio.get_running_loop()
         started = loop.time()
         task = asyncio.create_task(awaitable)
-        use_drafts = await send_progress_draft(
-            update,
-            context,
-            title_key,
-            detail_key,
-            0,
-            max_tokens=max_tokens,
-        )
         while not task.done():
             await asyncio.sleep(interval_seconds)
             if task.done():
                 break
             elapsed = int(loop.time() - started)
-            draft_sent = use_drafts and await send_progress_draft(
-                update,
-                context,
-                title_key,
-                detail_key,
-                elapsed,
-                max_tokens=max_tokens,
-            )
-            if draft_sent:
-                continue
-            use_drafts = False
             await edit_message_html(
                 progress_message,
                 progress_text(
@@ -1750,31 +1728,62 @@ def build_application(token: str, db: Database, service: BotService):
         bot_id: int,
         question: str,
     ) -> int:
-        progress_message = await reply_html(
-            update.effective_message,
-            progress_text(
-                update,
-                tr(update, "ai.progress_ask_title"),
-                tr(update, "ai.progress_ask_detail"),
-                0,
-                max_tokens=service.settings.openrouter_interaction_max_tokens,
-            ),
-        )
-        result = await run_with_progress(
+        title_key = "ai.progress_ask_title"
+        detail_key = "ai.progress_ask_detail"
+        initial_progress = progress_text(
             update,
-            context,
-            progress_message,
+            tr(update, title_key),
+            tr(update, detail_key),
+            0,
+            max_tokens=service.settings.openrouter_interaction_max_tokens,
+        )
+        draft_ok = True
+        progress_message = await reply_html(update.effective_message, initial_progress)
+
+        loop = asyncio.get_running_loop()
+        stream_queue: asyncio.Queue[str] = asyncio.Queue()
+
+        def on_delta(delta: str) -> None:
+            if delta:
+                loop.call_soon_threadsafe(stream_queue.put_nowait, delta)
+
+        result_task = asyncio.create_task(
             asyncio.to_thread(
-                service.ask_bot,
+                service.ask_bot_streaming,
                 user_id,
                 bot_id,
                 question,
                 user_context=str(context.user_data.get("ask_user_context", "")),
-            ),
-            "ai.progress_ask_title",
-            "ai.progress_ask_detail",
-            max_tokens=service.settings.openrouter_interaction_max_tokens,
+                on_delta=on_delta,
+            )
         )
+        streamed_parts: list[str] = []
+        last_preview = ""
+        last_update = loop.time()
+        while not result_task.done() or not stream_queue.empty():
+            try:
+                delta = await asyncio.wait_for(stream_queue.get(), timeout=1.0)
+                streamed_parts.append(delta)
+            except asyncio.TimeoutError:
+                delta = ""
+
+            preview = "".join(streamed_parts).strip()
+            elapsed = int(loop.time() - last_update)
+            if not preview:
+                if elapsed >= 6:
+                    await edit_message_html(progress_message, initial_progress)
+                    last_update = loop.time()
+                continue
+            now = loop.time()
+            if preview == last_preview or (now - last_update < 0.8 and len(delta) < 80):
+                continue
+            last_preview = preview
+            last_update = now
+            if draft_ok:
+                draft_ok = await send_plain_draft(update, context, title_key, preview)
+            await edit_message_plain(progress_message, draft_preview_text(preview))
+
+        result = await result_task
         logger.info(
             "Ask bot result: user_id=%s bot_id=%s ok=%s", user_id, bot_id, result.ok
         )

@@ -124,7 +124,7 @@
   "edit.applying": "<b>🚀 Applying edit...</b>\n\nGenerating, validating, and restarting the child bot.",
   "followup.empty": "<b>✍️ Reply with the missing details</b>\n\nTap <b>Cancel</b> to abort.",
   "autofix.running": "<b>🛠️ Auto Fix running...</b>\n\nReading source, validation results, and recent logs, then asking the AI for a targeted repair.",
-  "ai.progress": "<b>{title}</b>\n\n{detail}\n\n<b>Elapsed</b>\n<code>{elapsed}s</code>{tokens}\n\n<i>Telegram shows a live draft while the AI works.</i>",
+  "ai.progress": "<b>{title}</b>\n\n{detail}\n\n<b>Elapsed</b>\n<code>{elapsed}s</code>{tokens}\n\n<i>This message updates while the AI works.</i>",
   "ai.progress_tokens_waiting": "\n\n<b>Token budget</b>\n<code>{budget}</code> completion tokens\n\n<b>Tokens used</b>\nWaiting for OpenRouter to report usage...",
   "ai.usage_plain": "AI tokens used\nPrompt: {prompt}\nCompletion: {completion}\nTotal: {total}",
   "ai.progress_newbot_title": "🧠 Designing the bot",
