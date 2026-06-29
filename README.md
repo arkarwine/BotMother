@@ -170,7 +170,7 @@ BotMother uses OpenRouter and can route different AI jobs to different models:
 - `OPENROUTER_CODING_MODEL` handles raw Python generation, prompt edits, and refinement layers.
 - `OPENROUTER_MODEL` is an optional fallback when a role-specific model is not set.
 
-For New Bot/Edit/Revise, the interaction model first turns the user's request, answers, locale, and relevant requester context into a full English implementation prompt. The coding model receives that Gemini-written prompt instead of raw chat text. This keeps raw user interaction context separate while still giving the coding model the complete translated context it needs.
+For New Bot/Edit/Revise, the interaction model first turns the user's request, answers, locale, and relevant requester context into a full English implementation prompt. The coding model receives that Gemini-written prompt instead of raw chat text, so it still gets complete translated context without reading the original conversation directly.
 
 The default performance/price split is:
 
