@@ -47,6 +47,7 @@ def main() -> None:
         coding_reasoning_effort=settings.openrouter_coding_reasoning_effort,
         exclude_reasoning=settings.openrouter_exclude_reasoning,
         request_timeout_seconds=settings.openrouter_request_timeout_seconds,
+        coding_provider_only=settings.openrouter_coding_provider_only,
     )
     runner = ProcessManager(settings=settings, db=db)
     service = BotService(settings=settings, db=db, generator=generator, runner=runner)

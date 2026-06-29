@@ -705,6 +705,7 @@ class OpenRouterCodeGenerator:
     coding_reasoning_effort: str = "low"
     exclude_reasoning: bool = True
     request_timeout_seconds: int = 180
+    coding_provider_only: tuple[str, ...] = ("deepseek",)
 
     def __post_init__(self) -> None:
         self.base_url = self.base_url.rstrip("/")
@@ -737,6 +738,12 @@ class OpenRouterCodeGenerator:
             reasoning["effort"] = effort
         if reasoning:
             payload["reasoning"] = reasoning
+        if self._model_role(model) == "coding" and self.coding_provider_only:
+            payload["provider"] = {
+                "only": list(self.coding_provider_only),
+                "allow_fallbacks": False,
+                "require_parameters": True,
+            }
         return payload
 
     def _chat(

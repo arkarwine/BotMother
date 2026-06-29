@@ -102,6 +102,7 @@ class AIDecisionTests(unittest.TestCase):
         self.assertEqual(payload["response_format"], {"type": "json_object"})
         self.assertEqual(payload["max_completion_tokens"], 6000)
         self.assertEqual(payload["reasoning"], {"exclude": True, "effort": "minimal"})
+        self.assertNotIn("provider", payload)
 
     def test_openrouter_chat_uses_coding_budget_for_coding_model(self):
         generator = OpenRouterCodeGenerator(
@@ -123,6 +124,30 @@ class AIDecisionTests(unittest.TestCase):
         self.assertEqual(payload["model"], "coding-model")
         self.assertEqual(payload["max_completion_tokens"], 2222)
         self.assertEqual(payload["reasoning"], {"exclude": True, "effort": "low"})
+        self.assertEqual(
+            payload["provider"],
+            {
+                "only": ["deepseek"],
+                "allow_fallbacks": False,
+                "require_parameters": True,
+            },
+        )
+
+    def test_openrouter_chat_allows_custom_coding_provider_pin(self):
+        generator = OpenRouterCodeGenerator(
+            api_key="sk-test",
+            model="fallback-model",
+            interaction_model="interaction-model",
+            coding_model="coding-model",
+            coding_provider_only=("DeepSeek",),
+        )
+
+        with patch("urllib.request.urlopen", return_value=FakeHTTPResponse()) as mocked:
+            generator._chat("system", "user", model="coding-model")
+
+        request = mocked.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["provider"]["only"], ["DeepSeek"])
 
     def test_openrouter_chat_normalizes_list_content(self):
         generator = OpenRouterCodeGenerator(api_key="sk-test", model="test-model")

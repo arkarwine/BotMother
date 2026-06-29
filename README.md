@@ -42,6 +42,7 @@ OPENROUTER_API_KEY=your-openrouter-key
 OPENROUTER_MODEL=
 OPENROUTER_INTERACTION_MODEL=google/gemini-2.5-flash
 OPENROUTER_CODING_MODEL=deepseek/deepseek-v4-pro
+OPENROUTER_CODING_PROVIDER_ONLY=deepseek
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_APP_NAME=BotMother
 OPENROUTER_APP_URL=
@@ -185,6 +186,7 @@ BotMother uses OpenRouter and can route different AI jobs to different models:
 - `OPENROUTER_INTERACTION_MODEL` handles user-facing planning, follow-up questions, readiness checks, and Ask Bot answers.
 - `OPENROUTER_CODING_MODEL` handles raw Python generation and prompt edits.
 - `OPENROUTER_MODEL` is an optional fallback when a role-specific model is not set.
+- `OPENROUTER_CODING_PROVIDER_ONLY=deepseek` pins coding calls to DeepSeek's official OpenRouter provider and disables provider fallback.
 - `OPENROUTER_INTERACTION_MAX_TOKENS` and `OPENROUTER_CODING_MAX_TOKENS` set explicit completion budgets so routed providers do not silently use tiny defaults.
 - `OPENROUTER_*_REASONING_EFFORT` controls how much reasoning budget OpenRouter should request for each role; use an empty value to let the provider choose.
 - `OPENROUTER_EXCLUDE_REASONING=true` keeps hidden reasoning out of the returned assistant message and logs.
@@ -192,13 +194,14 @@ BotMother uses OpenRouter and can route different AI jobs to different models:
 
 For New Bot/Edit/Revise, the interaction model first turns the user's request, answers, locale, and relevant requester context into a full English implementation prompt. The coding model receives that Gemini-written prompt instead of raw chat text, so it still gets complete translated context without reading the original conversation directly.
 
-Long AI operations use Telegram Bot API draft streaming via `sendMessageDraft` / `python-telegram-bot`'s `send_message_draft`. Ask Bot and planner/readiness calls stream OpenRouter SSE chunks into native Telegram drafts first; editing the progress message is only a fallback if draft streaming fails. Planner/readiness calls use a hybrid response: private JSON first, a `<<<BOTMOTHER_RESPONSE_TEXT>>>` delimiter, then user-facing text. BotMother parses the JSON privately and streams only the text after the delimiter into Telegram. Generated Python code is not streamed into chat.
+Long AI operations use Telegram Bot API draft streaming via `sendMessageDraft` / `python-telegram-bot`'s `send_message_draft`. Ask Bot and planner/readiness calls stream OpenRouter SSE chunks into native Telegram drafts first; editing the progress message is only a fallback if draft streaming fails. When the answer is complete, BotMother clears the draft preview, removes the temporary progress message, and sends one persisted final message with the relevant inline buttons. Planner/readiness calls use a hybrid response: private JSON first, a `<<<BOTMOTHER_RESPONSE_TEXT>>>` delimiter, then user-facing text. BotMother parses the JSON privately and streams only the text after the delimiter into Telegram. Generated Python code and token counters are not streamed into chat.
 
 The default performance/price split is:
 
 ```env
 OPENROUTER_INTERACTION_MODEL=google/gemini-2.5-flash
 OPENROUTER_CODING_MODEL=deepseek/deepseek-v4-pro
+OPENROUTER_CODING_PROVIDER_ONLY=deepseek
 OPENROUTER_INTERACTION_MAX_TOKENS=6000
 OPENROUTER_CODING_MAX_TOKENS=24000
 OPENROUTER_INTERACTION_REASONING_EFFORT=minimal

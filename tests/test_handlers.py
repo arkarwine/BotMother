@@ -3,13 +3,14 @@ import tempfile
 from pathlib import Path
 import re
 
-from botmother.ai import AIDecision, AIQuestion
+from botmother.ai import AIDecision, AIQuestion, AIUsage
 from botmother.db import Database
 from botmother.handlers import (
     NEWBOT_EXAMPLES_CALLBACK,
     NEWBOT_TEMPLATE_CALLBACK_PATTERN,
     USER_LOCALE_CACHE,
     apply_bot_template,
+    append_ai_usage,
     chunk_text,
     compact_bot_label,
     format_ai_questions,
@@ -305,6 +306,15 @@ class HandlerHelperTests(unittest.TestCase):
         update = SlotUpdate()
 
         self.assertEqual(locale_for_update(update), "my")
+
+    def test_append_ai_usage_keeps_token_counts_private(self):
+        text = append_ai_usage(
+            "Done.",
+            AIUsage(prompt_tokens=10, completion_tokens=20, total_tokens=30),
+            "en",
+        )
+
+        self.assertEqual(text, "Done.")
 
 
 if __name__ == "__main__":
