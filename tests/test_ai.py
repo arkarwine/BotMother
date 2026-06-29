@@ -121,25 +121,24 @@ class AIDecisionTests(unittest.TestCase):
 
         request = mocked.call_args.args[0]
         payload = json.loads(request.data.decode("utf-8"))
-        self.assertEqual(payload["model"], "coding-model")
+        self.assertEqual(payload["model"], "coding-model:nitro")
         self.assertEqual(payload["max_completion_tokens"], 2222)
         self.assertEqual(payload["reasoning"], {"exclude": True, "effort": "low"})
         self.assertEqual(
             payload["provider"],
             {
-                "only": ["deepseek"],
+                "order": ["Novita", "Fireworks", "SiliconFlow"],
                 "allow_fallbacks": False,
-                "require_parameters": True,
             },
         )
 
-    def test_openrouter_chat_allows_custom_coding_provider_pin(self):
+    def test_openrouter_chat_allows_custom_coding_provider_order(self):
         generator = OpenRouterCodeGenerator(
             api_key="sk-test",
             model="fallback-model",
             interaction_model="interaction-model",
             coding_model="coding-model",
-            coding_provider_only=("DeepSeek",),
+            coding_provider_only=("Fireworks", "Novita"),
         )
 
         with patch("urllib.request.urlopen", return_value=FakeHTTPResponse()) as mocked:
@@ -147,7 +146,23 @@ class AIDecisionTests(unittest.TestCase):
 
         request = mocked.call_args.args[0]
         payload = json.loads(request.data.decode("utf-8"))
-        self.assertEqual(payload["provider"]["only"], ["DeepSeek"])
+        self.assertEqual(payload["model"], "coding-model:nitro")
+        self.assertEqual(payload["provider"]["order"], ["Fireworks", "Novita"])
+
+    def test_openrouter_chat_replaces_existing_coding_model_variant_with_nitro(self):
+        generator = OpenRouterCodeGenerator(
+            api_key="sk-test",
+            model="fallback-model",
+            interaction_model="interaction-model",
+            coding_model="coding-model:floor",
+        )
+
+        with patch("urllib.request.urlopen", return_value=FakeHTTPResponse()) as mocked:
+            generator._chat("system", "user", model="coding-model:floor")
+
+        request = mocked.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["model"], "coding-model:nitro")
 
     def test_openrouter_chat_normalizes_list_content(self):
         generator = OpenRouterCodeGenerator(api_key="sk-test", model="test-model")

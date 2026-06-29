@@ -705,7 +705,7 @@ class OpenRouterCodeGenerator:
     coding_reasoning_effort: str = "low"
     exclude_reasoning: bool = True
     request_timeout_seconds: int = 180
-    coding_provider_only: tuple[str, ...] = ("deepseek",)
+    coding_provider_only: tuple[str, ...] = ("Novita", "Fireworks", "SiliconFlow")
 
     def __post_init__(self) -> None:
         self.base_url = self.base_url.rstrip("/")
@@ -726,6 +726,12 @@ class OpenRouterCodeGenerator:
             return self.coding_reasoning_effort.strip()
         return self.interaction_reasoning_effort.strip()
 
+    def _request_model_for_model(self, model: str) -> str:
+        if self._model_role(model) != "coding":
+            return model
+        base_model = model.rsplit(":", 1)[0] if ":" in model.rsplit("/", 1)[-1] else model
+        return f"{base_model}:nitro"
+
     def _build_extra_payload(self, model: str) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "max_completion_tokens": self._max_tokens_for_model(model),
@@ -740,9 +746,8 @@ class OpenRouterCodeGenerator:
             payload["reasoning"] = reasoning
         if self._model_role(model) == "coding" and self.coding_provider_only:
             payload["provider"] = {
-                "only": list(self.coding_provider_only),
+                "order": list(self.coding_provider_only),
                 "allow_fallbacks": False,
-                "require_parameters": True,
             }
         return payload
 
@@ -785,6 +790,8 @@ class OpenRouterCodeGenerator:
             ],
         }
         payload.update(self._build_extra_payload(resolved_model))
+        request_model = self._request_model_for_model(resolved_model)
+        payload["model"] = request_model
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
 
@@ -799,7 +806,7 @@ class OpenRouterCodeGenerator:
 
         logger.debug(
             "OpenRouter request: model=%s role=%s json_mode=%s max_completion_tokens=%s reasoning=%s system_chars=%s user_chars=%s",
-            resolved_model,
+            request_model,
             self._model_role(resolved_model),
             json_mode,
             payload.get("max_completion_tokens"),
@@ -864,7 +871,7 @@ class OpenRouterCodeGenerator:
                     else None
                 ),
                 response_id=str(data.get("id")) if data.get("id") is not None else None,
-                requested_model=resolved_model,
+                requested_model=request_model,
                 returned_model=(
                     str(data.get("model")) if data.get("model") is not None else None
                 ),
@@ -872,7 +879,7 @@ class OpenRouterCodeGenerator:
         logger.debug(
             "OpenRouter response: id=%s requested_model=%s returned_model=%s finish_reason=%s content_chars=%s usage=%s",
             data.get("id"),
-            resolved_model,
+            request_model,
             data.get("model"),
             choice.get("finish_reason"),
             len(content),
@@ -892,7 +899,7 @@ class OpenRouterCodeGenerator:
                 else None
             ),
             response_id=str(data.get("id")) if data.get("id") is not None else None,
-            requested_model=resolved_model,
+            requested_model=request_model,
             returned_model=(
                 str(data.get("model")) if data.get("model") is not None else None
             ),
@@ -925,6 +932,8 @@ class OpenRouterCodeGenerator:
             ],
         }
         payload.update(self._build_extra_payload(resolved_model))
+        request_model = self._request_model_for_model(resolved_model)
+        payload["model"] = request_model
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
 
@@ -940,7 +949,7 @@ class OpenRouterCodeGenerator:
 
         logger.debug(
             "OpenRouter streaming request: model=%s role=%s max_completion_tokens=%s reasoning=%s system_chars=%s user_chars=%s",
-            resolved_model,
+            request_model,
             self._model_role(resolved_model),
             payload.get("max_completion_tokens"),
             payload.get("reasoning"),
@@ -1034,7 +1043,7 @@ class OpenRouterCodeGenerator:
             finish_reason=finish_reason,
             native_finish_reason=native_finish_reason,
             response_id=response_id,
-            requested_model=resolved_model,
+            requested_model=request_model,
             returned_model=returned_model,
         )
         logger.debug(

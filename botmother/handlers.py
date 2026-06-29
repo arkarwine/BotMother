@@ -973,12 +973,6 @@ def build_application(token: str, db: Database, service: BotService):
                 )
         await message.reply_text(text, reply_markup=reply_markup)
 
-    async def delete_message_safely(message) -> None:
-        try:
-            await message.delete()
-        except Exception:
-            logger.debug("Could not delete progress message", exc_info=True)
-
     async def edit_or_reply_html(update: Update, text: str, reply_markup=None):
         query = update.callback_query
         can_edit_markup = reply_markup is None or isinstance(
@@ -1020,13 +1014,7 @@ def build_application(token: str, db: Database, service: BotService):
         text: str,
         reply_markup=None,
     ):
-        if context.user_data.pop("_botmother_stream_used_draft", False):
-            await clear_plain_draft(update, context)
-            await delete_message_safely(progress_message)
-            sent = await reply_html(
-                update.effective_message, text, reply_markup=reply_markup
-            )
-            return sent
+        context.user_data.pop("_botmother_stream_used_draft", None)
         await edit_message_html(progress_message, text, reply_markup=reply_markup)
         return progress_message
 
@@ -1137,19 +1125,6 @@ def build_application(token: str, db: Database, service: BotService):
         except Exception:
             logger.debug("Telegram plain draft streaming failed", exc_info=True)
             return False
-
-    async def clear_plain_draft(
-        update: Update,
-        context: ContextTypes.DEFAULT_TYPE,
-    ) -> None:
-        try:
-            await context.bot.send_message_draft(
-                chat_id=_chat_id(update),
-                draft_id=progress_draft_id(update, ""),
-                text="",
-            )
-        except Exception:
-            logger.debug("Telegram plain draft clear failed", exc_info=True)
 
     async def run_with_progress(
         update: Update,
@@ -1598,8 +1573,7 @@ def build_application(token: str, db: Database, service: BotService):
             context,
             progress_message,
             append_ai_usage(
-                (escape(decision.message.strip()) + "\n\n" if decision.message else "")
-                + tr(update, "newbot.token"),
+                tr(update, "newbot.token"),
                 combined_plan_usage,
                 locale_for_update(update),
             ),
@@ -2004,22 +1978,14 @@ def build_application(token: str, db: Database, service: BotService):
         chunks = chunk_text(
             append_ai_usage(result.message, result.ai_usage, locale_for_update(update))
         )
-        used_draft = context.user_data.pop("_botmother_stream_used_draft", False)
+        context.user_data.pop("_botmother_stream_used_draft", None)
         final_markup = bot_actions_keyboard(bot_id, locale_for_update(update))
         first_markup = final_markup if len(chunks) == 1 else None
-        if used_draft:
-            await clear_plain_draft(update, context)
-            await delete_message_safely(progress_message)
-            await update.effective_message.reply_text(
-                chunks[0],
-                reply_markup=first_markup,
-            )
-        else:
-            await edit_message_plain(
-                progress_message,
-                chunks[0],
-                reply_markup=first_markup,
-            )
+        await edit_message_plain(
+            progress_message,
+            chunks[0],
+            reply_markup=first_markup,
+        )
         for index, chunk in enumerate(chunks[1:], start=1):
             reply_markup = (
                 final_markup if index == len(chunks) - 1 else None
@@ -2857,8 +2823,6 @@ def build_application(token: str, db: Database, service: BotService):
             return EDIT_FOLLOWUP
 
         context.user_data["edit_plan_usage"] = decision.ai_usage
-        if context.user_data.get("_botmother_stream_used_draft"):
-            await clear_plain_draft(update, context)
         await send_coding_brief_messages(
             update, str(decision.code or ""), title_key="ai.edit_brief_title"
         )

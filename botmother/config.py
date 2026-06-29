@@ -51,6 +51,17 @@ def _csv_values(value: str | None) -> tuple[str, ...]:
     return tuple(part.strip() for part in value.split(",") if part.strip())
 
 
+def _openrouter_provider_names(value: str | None) -> tuple[str, ...]:
+    names = _csv_values(value)
+    canonical = {
+        "deepseek": "DeepSeek",
+        "novita": "Novita",
+        "fireworks": "Fireworks",
+        "siliconflow": "SiliconFlow",
+    }
+    return tuple(canonical.get(name.lower(), name) for name in names)
+
+
 def _path_from_env(value: str, base_dir: Path) -> Path:
     path = Path(value).expanduser()
     if not path.is_absolute():
@@ -81,7 +92,11 @@ class Settings:
     openrouter_exclude_reasoning: bool = True
     openrouter_request_timeout_seconds: int = 180
     openrouter_coding_timeout_seconds: float = 360.0
-    openrouter_coding_provider_only: tuple[str, ...] = ("deepseek",)
+    openrouter_coding_provider_only: tuple[str, ...] = (
+        "Novita",
+        "Fireworks",
+        "SiliconFlow",
+    )
     credits_enabled: bool = True
     credits_initial_free: int = 50
     credit_cost_new_bot: int = 10
@@ -154,8 +169,11 @@ class Settings:
             openrouter_coding_timeout_seconds=float(
                 os.getenv("OPENROUTER_CODING_TIMEOUT_SECONDS", "360")
             ),
-            openrouter_coding_provider_only=_csv_values(
-                os.getenv("OPENROUTER_CODING_PROVIDER_ONLY", "deepseek")
+            openrouter_coding_provider_only=_openrouter_provider_names(
+                os.getenv(
+                    "OPENROUTER_CODING_PROVIDER_ONLY",
+                    "Novita,Fireworks,SiliconFlow",
+                )
             ),
             credits_enabled=_bool_from_env(os.getenv("CREDITS_ENABLED"), True),
             credits_initial_free=int(os.getenv("CREDITS_INITIAL_FREE", "50")),
