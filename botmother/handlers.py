@@ -67,6 +67,8 @@ BOT_TEMPLATE_PROMPTS = {
 }
 
 BOT_LIST_PAGE_SIZE = 10
+NEWBOT_TEMPLATE_CALLBACK_PATTERN = r"^template:\w+$"
+NEWBOT_EXAMPLES_CALLBACK = "newbot:examples"
 
 
 def apply_bot_template(prompt: str, template: str | None) -> str:
@@ -576,7 +578,10 @@ def build_application(token: str, db: Database, service: BotService):
         return InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton(t("button.examples", locale=locale), callback_data="nav:examples"),
+                    InlineKeyboardButton(
+                        t("button.examples", locale=locale),
+                        callback_data=NEWBOT_EXAMPLES_CALLBACK,
+                    ),
                     InlineKeyboardButton(t("button.change_mode", locale=locale), callback_data="template:choose"),
                 ],
                 [InlineKeyboardButton(t("button.cancel", locale=locale), callback_data="nav:cancel")],
@@ -1113,6 +1118,8 @@ def build_application(token: str, db: Database, service: BotService):
         if query is not None:
             await query.answer()
         _remember_user(db, update)
+        if "newbot_user_context" not in context.user_data:
+            context.user_data["newbot_user_context"] = user_context_for_ai(update)
         template = (query.data if query else "template:other").split(":", 1)[1]
         if template == "choose":
             await edit_or_reply_html(
@@ -1133,6 +1140,21 @@ def build_application(token: str, db: Database, service: BotService):
         )
         return NEW_PROMPT
 
+    async def newbot_template_entry(
+        update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        user_id = _remember_user(db, update)
+        logger.info(
+            "New Bot template entry: user_id=%s data=%s",
+            user_id,
+            update.callback_query.data if update.callback_query else None,
+        )
+        user_context = user_context_for_ai(update)
+        refund_flow_credits(context, "New Bot template restarted")
+        context.user_data.clear()
+        context.user_data["newbot_user_context"] = user_context
+        return await newbot_template(update, context)
+
     async def newbot_examples_button(
         update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> int:
@@ -1140,12 +1162,25 @@ def build_application(token: str, db: Database, service: BotService):
         if query is not None:
             await query.answer()
         _remember_user(db, update)
+        if "newbot_user_context" not in context.user_data:
+            context.user_data["newbot_user_context"] = user_context_for_ai(update)
         await edit_or_reply_html(
             update,
             tr(update, "newbot.examples_in_flow"),
             reply_markup=newbot_prompt_keyboard(locale_for_update(update)),
         )
         return NEW_PROMPT
+
+    async def newbot_examples_entry(
+        update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
+        user_id = _remember_user(db, update)
+        logger.info("New Bot examples entry: user_id=%s", user_id)
+        user_context = user_context_for_ai(update)
+        refund_flow_credits(context, "New Bot examples restarted")
+        context.user_data.clear()
+        context.user_data["newbot_user_context"] = user_context
+        return await newbot_examples_button(update, context)
 
     async def newbot_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         user_id = _remember_user(db, update)
@@ -2502,24 +2537,54 @@ def build_application(token: str, db: Database, service: BotService):
         CallbackQueryHandler(cancel, pattern="^nav:cancel$"),
         MessageHandler(filters.Regex("^❌ Cancel$"), cancel),
     ]
+    restart_newbot_handlers = [
+        CallbackQueryHandler(newbot_button, pattern="^nav:newbot$"),
+        MessageHandler(filters.Regex("^🪄 New Bot$"), newbot),
+    ]
 
     newbot_conv = ConversationHandler(
         entry_points=[
             CommandHandler("newbot", newbot),
             MessageHandler(filters.Regex("^🪄 New Bot$"), newbot),
             CallbackQueryHandler(newbot_button, pattern="^nav:newbot$"),
+            CallbackQueryHandler(newbot_reprompt, pattern=r"^reprompt:newbot$"),
+            CallbackQueryHandler(
+                newbot_template_entry, pattern=NEWBOT_TEMPLATE_CALLBACK_PATTERN
+            ),
+            CallbackQueryHandler(
+                newbot_examples_entry, pattern=f"^{NEWBOT_EXAMPLES_CALLBACK}$"
+            ),
         ],
         states={
             NEW_PROMPT: [
-                CallbackQueryHandler(newbot_template, pattern=r"^template:\w+$"),
-                CallbackQueryHandler(newbot_examples_button, pattern=r"^nav:examples$"),
+                *restart_newbot_handlers,
+                CallbackQueryHandler(
+                    newbot_template, pattern=NEWBOT_TEMPLATE_CALLBACK_PATTERN
+                ),
+                CallbackQueryHandler(
+                    newbot_examples_button, pattern=f"^{NEWBOT_EXAMPLES_CALLBACK}$"
+                ),
                 MessageHandler(conversation_text, newbot_prompt),
             ],
             NEW_FOLLOWUP: [
+                *restart_newbot_handlers,
+                CallbackQueryHandler(
+                    newbot_template_entry, pattern=NEWBOT_TEMPLATE_CALLBACK_PATTERN
+                ),
+                CallbackQueryHandler(
+                    newbot_examples_entry, pattern=f"^{NEWBOT_EXAMPLES_CALLBACK}$"
+                ),
                 CallbackQueryHandler(newbot_reprompt, pattern=r"^reprompt:newbot$"),
                 MessageHandler(conversation_text, newbot_followup),
             ],
             NEW_TOKEN: [
+                *restart_newbot_handlers,
+                CallbackQueryHandler(
+                    newbot_template_entry, pattern=NEWBOT_TEMPLATE_CALLBACK_PATTERN
+                ),
+                CallbackQueryHandler(
+                    newbot_examples_entry, pattern=f"^{NEWBOT_EXAMPLES_CALLBACK}$"
+                ),
                 CallbackQueryHandler(newbot_reprompt, pattern=r"^reprompt:newbot$"),
                 MessageHandler(conversation_text, newbot_token),
             ],

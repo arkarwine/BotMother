@@ -1,10 +1,13 @@
 import unittest
 import tempfile
 from pathlib import Path
+import re
 
 from botmother.ai import AIDecision, AIQuestion
 from botmother.db import Database
 from botmother.handlers import (
+    NEWBOT_EXAMPLES_CALLBACK,
+    NEWBOT_TEMPLATE_CALLBACK_PATTERN,
     USER_LOCALE_CACHE,
     apply_bot_template,
     chunk_text,
@@ -194,6 +197,12 @@ class HandlerHelperTests(unittest.TestCase):
         self.assertEqual(newbot_brief_key("shop"), "newbot.template_shop")
         self.assertEqual(newbot_brief_key("nonsense"), "newbot.template_other")
         self.assertEqual(newbot_brief_key(None), "newbot.template_other")
+
+    def test_newbot_menu_uses_flow_specific_callbacks(self):
+        self.assertEqual(NEWBOT_EXAMPLES_CALLBACK, "newbot:examples")
+        self.assertNotEqual(NEWBOT_EXAMPLES_CALLBACK, "nav:examples")
+        self.assertRegex("template:shop", re.compile(NEWBOT_TEMPLATE_CALLBACK_PATTERN))
+        self.assertRegex("template:choose", re.compile(NEWBOT_TEMPLATE_CALLBACK_PATTERN))
 
     def test_format_ai_questions_appends_structured_questions_after_message(self):
         decision = AIDecision(
