@@ -40,7 +40,7 @@ Set these values in `.env`:
 MOTHER_BOT_TOKEN=123456:mother-token-from-botfather
 OPENROUTER_API_KEY=your-openrouter-key
 OPENROUTER_MODEL=
-OPENROUTER_INTERACTION_MODEL=google/gemini-2.5-pro
+OPENROUTER_INTERACTION_MODEL=google/gemini-2.5-flash
 OPENROUTER_CODING_MODEL=deepseek/deepseek-v4-pro
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_APP_NAME=BotMother
@@ -51,6 +51,7 @@ OPENROUTER_INTERACTION_REASONING_EFFORT=minimal
 OPENROUTER_CODING_REASONING_EFFORT=low
 OPENROUTER_EXCLUDE_REASONING=true
 OPENROUTER_REQUEST_TIMEOUT_SECONDS=180
+OPENROUTER_CODING_TIMEOUT_SECONDS=360
 BOTMOTHER_DB=./data/botmother.sqlite3
 BOTMOTHER_WORKDIR=./data/bots
 OWNER_IDS=123456789
@@ -77,6 +78,15 @@ PYTHON_BIN=/home/ubuntu/BotMother/.venv/bin/python
 ```
 
 `PYTHON_BIN=/home/ubuntu/BotMother/.venv/bin/python3` also works when that file exists. Check with `ls -l .venv/bin/python*`. If `PYTHON_BIN=python3`, install the Python dependencies into the system Python environment visible inside Bubblewrap.
+
+If a child bot log shows `bwrap: setting up uid map: Permission denied`, the host is blocking Bubblewrap user namespaces. Enable them on Ubuntu:
+
+```bash
+sudo sysctl -w kernel.unprivileged_userns_clone=1
+printf 'kernel.unprivileged_userns_clone=1\n' | sudo tee /etc/sysctl.d/99-botmother-userns.conf
+```
+
+For trusted local testing only, `BOTMOTHER_REQUIRE_BWRAP=false` bypasses the sandbox. Do not use that for untrusted public bot creation.
 
 ## Telegram Controls
 
@@ -178,15 +188,16 @@ BotMother uses OpenRouter and can route different AI jobs to different models:
 - `OPENROUTER_INTERACTION_MAX_TOKENS` and `OPENROUTER_CODING_MAX_TOKENS` set explicit completion budgets so routed providers do not silently use tiny defaults.
 - `OPENROUTER_*_REASONING_EFFORT` controls how much reasoning budget OpenRouter should request for each role; use an empty value to let the provider choose.
 - `OPENROUTER_EXCLUDE_REASONING=true` keeps hidden reasoning out of the returned assistant message and logs.
+- `OPENROUTER_CODING_TIMEOUT_SECONDS` is BotMother's wall-clock timeout for code writing/editing. It stops the user flow and refunds failed paid actions even if the provider keeps the HTTP connection open.
 
 For New Bot/Edit/Revise, the interaction model first turns the user's request, answers, locale, and relevant requester context into a full English implementation prompt. The coding model receives that Gemini-written prompt instead of raw chat text, so it still gets complete translated context without reading the original conversation directly.
 
-Long AI operations use Telegram Bot API draft streaming via `sendMessageDraft` / `python-telegram-bot`'s `send_message_draft`. Ask Bot also streams OpenRouter SSE chunks into the Telegram draft as the answer is generated. Planner/readiness calls still wait for complete strict JSON before showing the final message, and generated Python code is not streamed into chat.
+Long AI operations use Telegram Bot API draft streaming via `sendMessageDraft` / `python-telegram-bot`'s `send_message_draft`. Ask Bot streams OpenRouter SSE chunks into the visible answer and Telegram draft as text arrives. Planner/readiness calls use streamed OpenRouter JSON internally for live received-token counters, but BotMother waits for complete valid JSON before showing the clean user-facing question or plan. Generated Python code is not streamed into chat.
 
 The default performance/price split is:
 
 ```env
-OPENROUTER_INTERACTION_MODEL=google/gemini-2.5-pro
+OPENROUTER_INTERACTION_MODEL=google/gemini-2.5-flash
 OPENROUTER_CODING_MODEL=deepseek/deepseek-v4-pro
 OPENROUTER_INTERACTION_MAX_TOKENS=6000
 OPENROUTER_CODING_MAX_TOKENS=24000

@@ -182,6 +182,52 @@ class AIDecisionTests(unittest.TestCase):
         self.assertTrue(payload["stream"])
         self.assertEqual(payload["stream_options"], {"include_usage": True})
 
+    def test_json_decision_uses_streaming_payload_and_reports_deltas(self):
+        generator = OpenRouterCodeGenerator(api_key="sk-test", model="test-model")
+        text = json.dumps(
+            {
+                "type": "questions",
+                "message": "Need admin ID?",
+                "questions": [
+                    {
+                        "id": "admin_id",
+                        "question": "Which admin Telegram user ID should manage it?",
+                        "suggestions": [],
+                    }
+                ],
+                "code": None,
+                "env": [],
+            }
+        )
+        split = len(text) // 2
+        lines = [
+            "data: "
+            + json.dumps({"choices": [{"delta": {"content": text[:split]}}]})
+            + "\n\n",
+            "data: "
+            + json.dumps({"choices": [{"delta": {"content": text[split:]}}]})
+            + "\n\n",
+            'data: {"usage":{"prompt_tokens":8,"completion_tokens":6,"total_tokens":14},"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+            "data: [DONE]\n\n",
+        ]
+        deltas = []
+
+        with patch(
+            "urllib.request.urlopen", return_value=FakeStreamingHTTPResponse(lines)
+        ) as mocked:
+            decision = generator.decide_new_bot(
+                "make admin bot", [], on_delta=deltas.append
+            )
+
+        self.assertTrue(decision.needs_questions)
+        self.assertEqual("".join(deltas), text)
+        self.assertIsNotNone(decision.ai_usage)
+        self.assertEqual(decision.ai_usage.total_tokens, 14)
+        request = mocked.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertTrue(payload["stream"])
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+
     def test_empty_json_response_falls_back_instead_of_crashing(self):
         generator = make_generator(["", "", ""])
 

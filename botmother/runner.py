@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 MAX_UNEXPECTED_SIGNAL_RESTARTS = 2
 UNEXPECTED_SIGNAL_RESTART_DELAY_SECONDS = 2
 SIGNAL_EXIT_STATUS_GRACE_SECONDS = 1.0
+BWRAP_PREFLIGHT_TIMEOUT_SECONDS = 5.0
 
 
 class RunnerError(RuntimeError):
@@ -52,6 +53,24 @@ def is_signal_exit(return_code: int | None) -> bool:
     return return_code is not None and return_code < 0
 
 
+def bubblewrap_failure_hint(stderr: str) -> str:
+    detail = stderr.strip() or "Bubblewrap exited without stderr."
+    lower = detail.lower()
+    if "uid map" in lower or "user namespace" in lower:
+        return (
+            "Bubblewrap sandbox is unavailable because the host denied user-namespace "
+            "uid-map setup.\n\n"
+            f"Bubblewrap error:\n{detail}\n\n"
+            "Ubuntu fix:\n"
+            "sudo sysctl -w kernel.unprivileged_userns_clone=1\n"
+            "printf 'kernel.unprivileged_userns_clone=1\\n' | "
+            "sudo tee /etc/sysctl.d/99-botmother-userns.conf\n\n"
+            "Only for trusted local testing, you can disable sandboxing with "
+            "BOTMOTHER_REQUIRE_BWRAP=false and restart BotMother."
+        )
+    return f"Bubblewrap sandbox preflight failed.\n\nBubblewrap error:\n{detail}"
+
+
 class ProcessManager:
     def __init__(self, settings: Settings, db: Database) -> None:
         self.settings = settings
@@ -59,6 +78,7 @@ class ProcessManager:
         self.active: dict[int, ProcessRecord] = {}
         self.unexpected_signal_restarts: dict[int, int] = {}
         self.shutting_down = False
+        self._bwrap_preflight_ok = False
 
     def _resolve_python_bin(self) -> str:
         configured = self.settings.python_bin
@@ -144,6 +164,48 @@ class ProcessManager:
     def build_plain_command(self) -> list[str]:
         return [self.settings.python_bin, "bot.py"]
 
+    def build_bwrap_preflight_command(self) -> list[str]:
+        true_path = shutil.which("true") or "/usr/bin/true"
+        cmd = [self.settings.bwrap_bin, "--die-with-parent"]
+        for path in _existing_paths(["/usr", "/bin", "/lib", "/lib64"]):
+            cmd.extend(["--ro-bind", str(path), str(path)])
+        cmd.append(true_path)
+        return cmd
+
+    async def _ensure_bwrap_usable(self) -> None:
+        if self._bwrap_preflight_ok:
+            return
+        command = self.build_bwrap_preflight_command()
+        logger.debug("Running Bubblewrap preflight: command=%s", command)
+        process: asyncio.subprocess.Process | None = None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=BWRAP_PREFLIGHT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as exc:
+            if process is not None and process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise RunnerError(
+                f"Bubblewrap sandbox preflight timed out after {BWRAP_PREFLIGHT_TIMEOUT_SECONDS:.0f}s."
+            ) from exc
+        except OSError as exc:
+            raise RunnerError(f"Bubblewrap sandbox preflight could not start: {exc}") from exc
+
+        if process.returncode != 0:
+            stderr_text = stderr.decode("utf-8", errors="replace")
+            stdout_text = stdout.decode("utf-8", errors="replace").strip()
+            if stdout_text:
+                stderr_text = (stderr_text + "\n" + stdout_text).strip()
+            raise RunnerError(bubblewrap_failure_hint(stderr_text))
+        self._bwrap_preflight_ok = True
+
     def _child_env(self, token: str, bot_db_path: str, extra_env: dict[str, str] | None = None) -> dict[str, str]:
         env = {
             "BOT_TOKEN": token,
@@ -194,6 +256,18 @@ class ProcessManager:
                     f"Bubblewrap executable '{self.settings.bwrap_bin}' was not found. "
                     "Install it with: sudo apt install bubblewrap"
                 )
+            try:
+                await self._ensure_bwrap_usable()
+            except RunnerError as exc:
+                logger.error("Bubblewrap unavailable: bot_id=%s error=%s", bot_id, exc)
+                self.db.update_bot_status(bot_id, "sandbox_unavailable")
+                self.db.add_log(
+                    bot_id,
+                    "system",
+                    f"Bubblewrap unavailable: {exc}",
+                    self.settings.log_tail_rows,
+                )
+                raise
             command = self.build_sandbox_command(bot_dir)
             cwd = None
         else:

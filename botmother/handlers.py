@@ -39,6 +39,9 @@ STATUS_EMOJI = {
     "invalid": "🔴",
     "launch_failed": "🔴",
     "restart_failed": "🔴",
+    "python_missing": "🔴",
+    "sandbox_missing": "🔴",
+    "sandbox_unavailable": "🔴",
     "deleted": "🗑️",
     "generating": "🧠",
 }
@@ -477,6 +480,24 @@ def format_ai_usage_plain(usage: AIUsage | None, locale: str = "en") -> str:
 def append_ai_usage(text: str, usage: AIUsage | None, locale: str = "en") -> str:
     usage_text = format_ai_usage_plain(usage, locale=locale)
     return f"{text}\n\n{usage_text}" if usage_text else text
+
+
+def combine_ai_usage(*usages: AIUsage | None) -> AIUsage | None:
+    usable = [usage for usage in usages if usage is not None and usage.has_counts]
+    if not usable:
+        return None
+
+    def total_for(field: str) -> int | None:
+        values = [getattr(usage, field) for usage in usable]
+        known = [int(value) for value in values if value is not None]
+        return sum(known) if known else None
+
+    combined = AIUsage(
+        prompt_tokens=total_for("prompt_tokens"),
+        completion_tokens=total_for("completion_tokens"),
+        total_tokens=total_for("total_tokens"),
+    )
+    return combined if combined.has_counts else None
 
 
 def format_home_title(update: Any, service: BotService, user_id: int) -> str:
@@ -1005,9 +1026,19 @@ def build_application(token: str, db: Database, service: BotService):
         suffix = zlib.crc32(title_key.encode("utf-8")) % 997
         return max(1, (int(message_id) * 1000) + suffix + 1)
 
-    def progress_tokens_html(update: Update, max_tokens: int | None) -> str:
+    def progress_tokens_html(
+        update: Update, max_tokens: int | None, received_chars: int = 0
+    ) -> str:
         if max_tokens is None:
             return ""
+        if received_chars > 0:
+            return tr(
+                update,
+                "ai.progress_tokens_live",
+                approx=str(max(1, round(received_chars / 4))),
+                chars=str(received_chars),
+                budget=str(max_tokens),
+            )
         return tr(update, "ai.progress_tokens_waiting", budget=str(max_tokens))
 
     def progress_text(
@@ -1016,6 +1047,7 @@ def build_application(token: str, db: Database, service: BotService):
         detail: str,
         elapsed_seconds: int,
         max_tokens: int | None = None,
+        received_chars: int = 0,
     ) -> str:
         return tr(
             update,
@@ -1023,7 +1055,7 @@ def build_application(token: str, db: Database, service: BotService):
             title=escape(title),
             detail=escape(detail),
             elapsed=str(elapsed_seconds),
-            tokens=progress_tokens_html(update, max_tokens),
+            tokens=progress_tokens_html(update, max_tokens, received_chars),
         )
 
     def draft_preview_text(text: str, limit: int = 3900) -> str:
@@ -1031,6 +1063,43 @@ def build_application(token: str, db: Database, service: BotService):
         if len(stripped) <= limit:
             return stripped
         return "...\n" + stripped[-limit:]
+
+    def stream_preview_with_usage(
+        update: Update, text: str, max_tokens: int | None = None
+    ) -> str:
+        stripped = text.strip()
+        chars = len(stripped)
+        approx_tokens = max(1, round(chars / 4)) if chars else 0
+        footer = t(
+            "ai.stream_usage_plain",
+            locale=locale_for_update(update),
+            approx=str(approx_tokens),
+            chars=str(chars),
+            budget=str(max_tokens) if max_tokens is not None else "?",
+        )
+        room = max(1200, 3900 - len(footer) - 2)
+        return draft_preview_text(stripped, limit=room) + "\n\n" + footer
+
+    def coding_brief_chunks(brief: str, chunk_size: int = 2400) -> list[str]:
+        return chunk_text(brief.strip(), chunk_size) if brief.strip() else []
+
+    async def send_coding_brief_messages(
+        update: Update,
+        brief: str,
+        title_key: str = "ai.coding_brief_title",
+    ) -> None:
+        chunks = coding_brief_chunks(brief)
+        if not chunks:
+            return
+        total = len(chunks)
+        for index, chunk in enumerate(chunks, start=1):
+            await reply_html(
+                update.effective_message,
+                tr(update, title_key, page=str(index), pages=str(total))
+                + "\n\n<pre>"
+                + escape(chunk)
+                + "</pre>",
+            )
 
     async def send_plain_draft(
         update: Update,
@@ -1058,14 +1127,28 @@ def build_application(token: str, db: Database, service: BotService):
         detail_key: str,
         max_tokens: int | None = None,
         interval_seconds: float = 6.0,
+        stream_queue: asyncio.Queue[str] | None = None,
     ):
         loop = asyncio.get_running_loop()
         started = loop.time()
         task = asyncio.create_task(awaitable)
-        while not task.done():
-            await asyncio.sleep(interval_seconds)
-            if task.done():
+        last_update = 0.0
+        received_chars = 0
+        while not task.done() or (stream_queue is not None and not stream_queue.empty()):
+            if stream_queue is None:
+                await asyncio.sleep(interval_seconds)
+            else:
+                try:
+                    delta = await asyncio.wait_for(stream_queue.get(), timeout=0.8)
+                    received_chars += len(delta)
+                except asyncio.TimeoutError:
+                    pass
+            if task.done() and (stream_queue is None or stream_queue.empty()):
                 break
+            now = loop.time()
+            update_interval = 1.0 if received_chars else interval_seconds
+            if now - last_update < update_interval:
+                continue
             elapsed = int(loop.time() - started)
             await edit_message_html(
                 progress_message,
@@ -1075,9 +1158,21 @@ def build_application(token: str, db: Database, service: BotService):
                     tr(update, detail_key),
                     elapsed,
                     max_tokens=max_tokens,
+                    received_chars=received_chars,
                 ),
             )
+            last_update = now
         return await task
+
+    def make_stream_queue() -> tuple[asyncio.Queue[str], Any]:
+        loop = asyncio.get_running_loop()
+        stream_queue: asyncio.Queue[str] = asyncio.Queue()
+
+        def on_delta(delta: str) -> None:
+            if delta:
+                loop.call_soon_threadsafe(stream_queue.put_nowait, delta)
+
+        return stream_queue, on_delta
 
     async def restart_expired_flow(
         update: Update, context: ContextTypes.DEFAULT_TYPE, action: str, title: str
@@ -1335,6 +1430,7 @@ def build_application(token: str, db: Database, service: BotService):
             ),
         )
         try:
+            plan_stream_queue, plan_on_delta = make_stream_queue()
             decision = await run_with_progress(
                 update,
                 context,
@@ -1345,10 +1441,12 @@ def build_application(token: str, db: Database, service: BotService):
                     answers,
                     force_code=force_code,
                     user_context=str(context.user_data.get("newbot_user_context", "")),
+                    on_delta=plan_on_delta,
                 ),
                 "ai.progress_newbot_title",
                 "ai.progress_newbot_detail",
                 max_tokens=service.settings.openrouter_interaction_max_tokens,
+                stream_queue=plan_stream_queue,
             )
         except Exception:
             refund_flow_credits(context, "New Bot planning failed")
@@ -1365,7 +1463,11 @@ def build_application(token: str, db: Database, service: BotService):
             context.user_data["newbot_pending_questions"] = question_texts(decision)
             await edit_message_html(
                 progress_message,
-                format_ai_questions(decision),
+                append_ai_usage(
+                    format_ai_questions(decision),
+                    decision.ai_usage,
+                    locale_for_update(update),
+                ),
                 reply_markup=ai_response_keyboard("newbot", locale_for_update(update)),
             )
             return NEW_FOLLOWUP
@@ -1381,6 +1483,7 @@ def build_application(token: str, db: Database, service: BotService):
                     max_tokens=service.settings.openrouter_interaction_max_tokens,
                 ),
             )
+            readiness_stream_queue, readiness_on_delta = make_stream_queue()
             readiness = await run_with_progress(
                 update,
                 context,
@@ -1391,10 +1494,12 @@ def build_application(token: str, db: Database, service: BotService):
                     answers,
                     decision,
                     user_context=str(context.user_data.get("newbot_user_context", "")),
+                    on_delta=readiness_on_delta,
                 ),
                 "ai.progress_readiness_title",
                 "ai.progress_readiness_detail",
                 max_tokens=service.settings.openrouter_interaction_max_tokens,
+                stream_queue=readiness_stream_queue,
             )
         except Exception:
             refund_flow_credits(context, "New Bot readiness check failed")
@@ -1411,16 +1516,26 @@ def build_application(token: str, db: Database, service: BotService):
             context.user_data["newbot_pending_questions"] = question_texts(readiness)
             await edit_message_html(
                 progress_message,
-                format_ai_questions(readiness),
+                append_ai_usage(
+                    format_ai_questions(readiness),
+                    combine_ai_usage(decision.ai_usage, readiness.ai_usage),
+                    locale_for_update(update),
+                ),
                 reply_markup=ai_response_keyboard("newbot", locale_for_update(update)),
             )
             return NEW_FOLLOWUP
 
+        combined_plan_usage = combine_ai_usage(decision.ai_usage, readiness.ai_usage)
+        context.user_data["newbot_plan_usage"] = combined_plan_usage
         context.user_data["newbot_decision"] = decision
         await edit_message_html(
             progress_message,
-            (escape(decision.message.strip()) + "\n\n" if decision.message else "")
-            + tr(update, "newbot.token"),
+            append_ai_usage(
+                (escape(decision.message.strip()) + "\n\n" if decision.message else "")
+                + tr(update, "newbot.token"),
+                combined_plan_usage,
+                locale_for_update(update),
+            ),
             reply_markup=ai_response_keyboard("newbot", locale_for_update(update)),
         )
         return NEW_TOKEN
@@ -1513,6 +1628,7 @@ def build_application(token: str, db: Database, service: BotService):
                 reply_markup=token_retry_keyboard(locale_for_update(update)),
             )
             return NEW_TOKEN
+        await send_coding_brief_messages(update, str(decision.code or ""))
         progress_message = await reply_html(
             update.effective_message,
             progress_text(
@@ -1561,7 +1677,14 @@ def build_application(token: str, db: Database, service: BotService):
         )
         await edit_message_result(
             progress_message,
-            append_ai_usage(result.message, result.ai_usage, locale_for_update(update)),
+            append_ai_usage(
+                result.message,
+                combine_ai_usage(
+                    context.user_data.get("newbot_plan_usage"),
+                    result.ai_usage,
+                ),
+                locale_for_update(update),
+            ),
             reply_markup=result_markup,
         )
         context.user_data.clear()
@@ -1759,7 +1882,8 @@ def build_application(token: str, db: Database, service: BotService):
         )
         streamed_parts: list[str] = []
         last_preview = ""
-        last_update = loop.time()
+        started = loop.time()
+        last_update = 0.0
         while not result_task.done() or not stream_queue.empty():
             try:
                 delta = await asyncio.wait_for(stream_queue.get(), timeout=1.0)
@@ -1768,20 +1892,38 @@ def build_application(token: str, db: Database, service: BotService):
                 delta = ""
 
             preview = "".join(streamed_parts).strip()
-            elapsed = int(loop.time() - last_update)
-            if not preview:
-                if elapsed >= 6:
-                    await edit_message_html(progress_message, initial_progress)
-                    last_update = loop.time()
-                continue
             now = loop.time()
-            if preview == last_preview or (now - last_update < 0.8 and len(delta) < 80):
+            elapsed = int(now - started)
+            if not preview:
+                if now - last_update >= 6:
+                    await edit_message_html(
+                        progress_message,
+                        progress_text(
+                            update,
+                            tr(update, title_key),
+                            tr(update, detail_key),
+                            elapsed,
+                            max_tokens=service.settings.openrouter_interaction_max_tokens,
+                        ),
+                    )
+                    last_update = now
+                continue
+            if preview == last_preview or (
+                last_preview and now - last_update < 0.7 and len(delta) < 80
+            ):
                 continue
             last_preview = preview
             last_update = now
+            streamed_text = stream_preview_with_usage(
+                update,
+                preview,
+                max_tokens=service.settings.openrouter_interaction_max_tokens,
+            )
             if draft_ok:
-                draft_ok = await send_plain_draft(update, context, title_key, preview)
-            await edit_message_plain(progress_message, draft_preview_text(preview))
+                draft_ok = await send_plain_draft(
+                    update, context, title_key, streamed_text
+                )
+            await edit_message_plain(progress_message, streamed_text)
 
         result = await result_task
         logger.info(
@@ -2575,6 +2717,7 @@ def build_application(token: str, db: Database, service: BotService):
             ),
         )
         try:
+            edit_stream_queue, edit_on_delta = make_stream_queue()
             decision = await run_with_progress(
                 update,
                 context,
@@ -2587,10 +2730,12 @@ def build_application(token: str, db: Database, service: BotService):
                     answers,
                     force_code=force_code,
                     user_context=str(context.user_data.get("edit_user_context", "")),
+                    on_delta=edit_on_delta,
                 ),
                 "ai.progress_edit_title",
                 "ai.progress_edit_detail",
                 max_tokens=service.settings.openrouter_interaction_max_tokens,
+                stream_queue=edit_stream_queue,
             )
         except Exception:
             refund_flow_credits(context, "Edit planning failed")
@@ -2612,11 +2757,19 @@ def build_application(token: str, db: Database, service: BotService):
             context.user_data["edit_pending_questions"] = question_texts(decision)
             await edit_message_html(
                 progress_message,
-                format_ai_questions(decision),
+                append_ai_usage(
+                    format_ai_questions(decision),
+                    decision.ai_usage,
+                    locale_for_update(update),
+                ),
                 reply_markup=ai_response_keyboard("edit", locale_for_update(update)),
             )
             return EDIT_FOLLOWUP
 
+        context.user_data["edit_plan_usage"] = decision.ai_usage
+        await send_coding_brief_messages(
+            update, str(decision.code or ""), title_key="ai.edit_brief_title"
+        )
         await edit_message_html(
             progress_message,
             progress_text(
@@ -2661,7 +2814,14 @@ def build_application(token: str, db: Database, service: BotService):
         )
         await edit_message_result(
             progress_message,
-            append_ai_usage(result.message, result.ai_usage, locale_for_update(update)),
+            append_ai_usage(
+                result.message,
+                combine_ai_usage(
+                    context.user_data.get("edit_plan_usage"),
+                    result.ai_usage,
+                ),
+                locale_for_update(update),
+            ),
             reply_markup=result_markup,
         )
         context.user_data.clear()

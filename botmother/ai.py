@@ -237,6 +237,7 @@ class AIDecision:
     questions: tuple[AIQuestion, ...] = ()
     code: str | None = None
     env: tuple[AIEnvVar, ...] = ()
+    ai_usage: AIUsage | None = None
 
     @property
     def needs_questions(self) -> bool:
@@ -248,6 +249,7 @@ class AIReadinessDecision:
     type: str
     message: str
     questions: tuple[AIQuestion, ...] = ()
+    ai_usage: AIUsage | None = None
 
     @property
     def needs_questions(self) -> bool:
@@ -795,9 +797,12 @@ class OpenRouterCodeGenerator:
         user_prompt: str,
         model: str | None = None,
         on_delta: Callable[[str], None] | None = None,
+        json_mode: bool = False,
     ) -> AITextResult:
         if type(self)._chat is not OpenRouterCodeGenerator._chat:
-            result = self._chat_result(system_prompt, user_prompt, model=model)
+            result = self._chat_result(
+                system_prompt, user_prompt, model=model, json_mode=json_mode
+            )
             if result.text and on_delta is not None:
                 on_delta(result.text)
             return result
@@ -813,6 +818,8 @@ class OpenRouterCodeGenerator:
             ],
         }
         payload.update(self._build_extra_payload(resolved_model))
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -936,29 +943,81 @@ class OpenRouterCodeGenerator:
         )
         return result
 
-    def _generate_json_text(self, prompt: str) -> str:
-        text = self._chat(
-            JSON_SYSTEM_PROMPT,
-            prompt,
-            json_mode=True,
-            model=self.interaction_model,
-        )
-        if not text:
+    def _generate_json_result(
+        self, prompt: str, on_delta: Callable[[str], None] | None = None
+    ) -> AITextResult:
+        if on_delta is None:
+            result = self._chat_result(
+                JSON_SYSTEM_PROMPT,
+                prompt,
+                json_mode=True,
+                model=self.interaction_model,
+            )
+        else:
+            try:
+                result = self._chat_stream_result(
+                    JSON_SYSTEM_PROMPT,
+                    prompt,
+                    json_mode=True,
+                    model=self.interaction_model,
+                    on_delta=on_delta,
+                )
+            except RuntimeError:
+                logger.warning(
+                    "Streaming JSON decision failed; retrying without streaming",
+                    exc_info=True,
+                )
+                result = self._chat_result(
+                    JSON_SYSTEM_PROMPT,
+                    prompt,
+                    json_mode=True,
+                    model=self.interaction_model,
+                )
+        if not result.text:
             logger.error("OpenRouter returned an empty JSON decision")
             raise AIResponseError("OpenRouter returned an empty JSON decision.")
-        return text
+        return result
 
-    def _generate_readiness_text(self, prompt: str) -> str:
-        text = self._chat(
-            READINESS_SYSTEM_PROMPT,
-            prompt,
-            json_mode=True,
-            model=self.interaction_model,
-        )
-        if not text:
+    def _generate_json_text(self, prompt: str) -> str:
+        return self._generate_json_result(prompt).text
+
+    def _generate_readiness_result(
+        self, prompt: str, on_delta: Callable[[str], None] | None = None
+    ) -> AITextResult:
+        if on_delta is None:
+            result = self._chat_result(
+                READINESS_SYSTEM_PROMPT,
+                prompt,
+                json_mode=True,
+                model=self.interaction_model,
+            )
+        else:
+            try:
+                result = self._chat_stream_result(
+                    READINESS_SYSTEM_PROMPT,
+                    prompt,
+                    json_mode=True,
+                    model=self.interaction_model,
+                    on_delta=on_delta,
+                )
+            except RuntimeError:
+                logger.warning(
+                    "Streaming readiness decision failed; retrying without streaming",
+                    exc_info=True,
+                )
+                result = self._chat_result(
+                    READINESS_SYSTEM_PROMPT,
+                    prompt,
+                    json_mode=True,
+                    model=self.interaction_model,
+                )
+        if not result.text:
             logger.error("OpenRouter returned an empty readiness decision")
             raise AIResponseError("OpenRouter returned an empty readiness decision.")
-        return text
+        return result
+
+    def _generate_readiness_text(self, prompt: str) -> str:
+        return self._generate_readiness_result(prompt).text
 
     def _build_json_repair_prompt(
         self, original_prompt: str, invalid_text: str, error: str, attempt: int
@@ -1018,13 +1077,16 @@ class OpenRouterCodeGenerator:
             ),
         )
 
-    def _generate_json_decision(self, prompt: str) -> AIDecision:
+    def _generate_json_decision(
+        self, prompt: str, on_delta: Callable[[str], None] | None = None
+    ) -> AIDecision:
         current_prompt = prompt
         last_error = "Unknown AI response error."
         for attempt in range(MAX_JSON_REPAIR_ATTEMPTS + 1):
             text = ""
             try:
-                text = self._generate_json_text(current_prompt)
+                result = self._generate_json_result(current_prompt, on_delta=on_delta)
+                text = result.text
                 decision = parse_ai_decision(text)
             except AIResponseError as exc:
                 last_error = str(exc)
@@ -1046,7 +1108,14 @@ class OpenRouterCodeGenerator:
                 len(decision.code or ""),
                 len(decision.env),
             )
-            return decision
+            return AIDecision(
+                decision.type,
+                decision.message,
+                decision.questions,
+                decision.code,
+                decision.env,
+                result.usage,
+            )
         return self._fallback_questions_after_bad_json(last_error)
 
     def _build_readiness_repair_prompt(
@@ -1066,13 +1135,16 @@ class OpenRouterCodeGenerator:
             "Return one corrected JSON object only. No Markdown and no prose outside JSON."
         )
 
-    def _generate_readiness_decision(self, prompt: str) -> AIReadinessDecision:
+    def _generate_readiness_decision(
+        self, prompt: str, on_delta: Callable[[str], None] | None = None
+    ) -> AIReadinessDecision:
         current_prompt = prompt
         last_error = "Unknown AI readiness response error."
         for attempt in range(MAX_JSON_REPAIR_ATTEMPTS + 1):
             text = ""
             try:
-                text = self._generate_readiness_text(current_prompt)
+                result = self._generate_readiness_result(current_prompt, on_delta=on_delta)
+                text = result.text
                 decision = parse_readiness_decision(text)
             except AIResponseError as exc:
                 last_error = str(exc)
@@ -1092,7 +1164,12 @@ class OpenRouterCodeGenerator:
                 decision.type,
                 len(decision.questions),
             )
-            return decision
+            return AIReadinessDecision(
+                decision.type,
+                decision.message,
+                decision.questions,
+                result.usage,
+            )
         return self._fallback_readiness_questions_after_bad_json(last_error)
 
     def build_coding_brief(self, user_prompt: str, user_context: str = "") -> str:
@@ -1123,6 +1200,7 @@ class OpenRouterCodeGenerator:
         answer_history: list[dict[str, Any]],
         force_code: bool = False,
         user_context: str = "",
+        on_delta: Callable[[str], None] | None = None,
     ) -> AIDecision:
         logger.info(
             "Planning new bot: model=%s prompt_chars=%s answer_rounds=%s force_code=%s",
@@ -1140,7 +1218,7 @@ class OpenRouterCodeGenerator:
             f"Follow-up history:\n{format_answer_history(answer_history)}\n\n"
             f"Force code now: {'yes' if force_code else 'no'}"
         )
-        return self._generate_json_decision(prompt)
+        return self._generate_json_decision(prompt, on_delta=on_delta)
 
     def decide_edit(
         self,
@@ -1149,6 +1227,7 @@ class OpenRouterCodeGenerator:
         answer_history: list[dict[str, Any]],
         force_code: bool = False,
         user_context: str = "",
+        on_delta: Callable[[str], None] | None = None,
     ) -> AIDecision:
         logger.info(
             "Planning edit: model=%s code_chars=%s prompt_chars=%s answer_rounds=%s force_code=%s",
@@ -1171,7 +1250,7 @@ class OpenRouterCodeGenerator:
             f"Follow-up history:\n{format_answer_history(answer_history)}\n\n"
             f"Force code now: {'yes' if force_code else 'no'}"
         )
-        return self._generate_json_decision(prompt)
+        return self._generate_json_decision(prompt, on_delta=on_delta)
 
     def check_new_bot_readiness(
         self,
@@ -1179,6 +1258,7 @@ class OpenRouterCodeGenerator:
         answer_history: list[dict[str, Any]],
         decision: AIDecision,
         user_context: str = "",
+        on_delta: Callable[[str], None] | None = None,
     ) -> AIReadinessDecision:
         logger.info(
             "Checking new bot readiness: model=%s prompt_chars=%s answer_rounds=%s brief_chars=%s env=%s",
@@ -1203,7 +1283,7 @@ class OpenRouterCodeGenerator:
             "English implementation prompt:\n"
             f"{(decision.code or '').strip()}\n"
         )
-        return self._generate_readiness_decision(prompt)
+        return self._generate_readiness_decision(prompt, on_delta=on_delta)
 
     def generate_code(self, coding_brief: str, user_context: str = "") -> str:
         return self.generate_code_result(coding_brief, user_context=user_context).text

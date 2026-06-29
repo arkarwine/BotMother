@@ -199,7 +199,16 @@ class BotService:
         answer_history: list[dict],
         force_code: bool = False,
         user_context: str = "",
+        on_delta: Callable[[str], None] | None = None,
     ) -> AIDecision:
+        if on_delta is not None:
+            return self.generator.decide_new_bot(
+                prompt,
+                answer_history,
+                force_code=force_code,
+                user_context=user_context,
+                on_delta=on_delta,
+            )
         return self.generator.decide_new_bot(
             prompt,
             answer_history,
@@ -213,10 +222,22 @@ class BotService:
         answer_history: list[dict],
         decision: AIDecision,
         user_context: str = "",
+        on_delta: Callable[[str], None] | None = None,
     ) -> AIReadinessDecision:
         try:
+            if on_delta is not None:
+                return self.generator.check_new_bot_readiness(
+                    prompt,
+                    answer_history,
+                    decision,
+                    user_context=user_context,
+                    on_delta=on_delta,
+                )
             return self.generator.check_new_bot_readiness(
-                prompt, answer_history, decision, user_context=user_context
+                prompt,
+                answer_history,
+                decision,
+                user_context=user_context,
             )
         except Exception as exc:
             logger.exception("Readiness check failed")
@@ -240,6 +261,7 @@ class BotService:
         answer_history: list[dict],
         force_code: bool = False,
         user_context: str = "",
+        on_delta: Callable[[str], None] | None = None,
     ) -> AIDecision | OperationResult:
         if not self.can_manage(user_id, bot_id):
             logger.info("Denied edit planning: user_id=%s bot_id=%s", user_id, bot_id)
@@ -250,6 +272,15 @@ class BotService:
         if existing_revision is None or not existing_revision["code"]:
             return OperationResult(
                 False, "This bot has no saved source to edit.", bot_id
+            )
+        if on_delta is not None:
+            return self.generator.decide_edit(
+                existing_revision["code"],
+                edit_prompt,
+                answer_history,
+                force_code=force_code,
+                user_context=user_context,
+                on_delta=on_delta,
             )
         return self.generator.decide_edit(
             existing_revision["code"],
@@ -271,7 +302,9 @@ class BotService:
             coding_brief = await asyncio.to_thread(
                 self.generator.build_coding_brief, prompt, user_context=user_context
             )
-            generated = await asyncio.to_thread(self._generate_code_result, coding_brief)
+            generated = await self._run_coding_thread(
+                "Code generation", self._generate_code_result, coding_brief
+            )
         except AIResponseError as exc:
             logger.warning("Create generation failed before save: %s", exc)
             return OperationResult(False, f"⚠️ Code generation stopped\n\n{exc}")
@@ -298,7 +331,9 @@ class BotService:
             return OperationResult(False, "AI did not provide code yet.")
         coding_brief = decision.code
         try:
-            generated = await asyncio.to_thread(self._generate_code_result, coding_brief)
+            generated = await self._run_coding_thread(
+                "Code generation", self._generate_code_result, coding_brief
+            )
         except AIResponseError as exc:
             logger.warning("Create generation failed before save: %s", exc)
             return OperationResult(False, f"⚠️ Code generation stopped\n\n{exc}")
@@ -538,8 +573,8 @@ class BotService:
         latest_revision = self.db.latest_revision(bot_id)
         current_code = str(latest_revision["code"]) if latest_revision is not None else ""
         try:
-            generated = await asyncio.to_thread(
-                self._edit_code_result, current_code, decision.code
+            generated = await self._run_coding_thread(
+                "Code editing", self._edit_code_result, current_code, decision.code
             )
         except AIResponseError as exc:
             logger.warning("Prompt edit generation failed: bot_id=%s error=%s", bot_id, exc)
@@ -934,6 +969,23 @@ class BotService:
     def _env_dict(self, decision: AIDecision) -> dict[str, str]:
         return {item.name: item.value for item in decision.env}
 
+    async def _run_coding_thread(
+        self, label: str, func: Callable[..., AITextResult], *args: object
+    ) -> AITextResult:
+        timeout = max(0.01, float(self.settings.openrouter_coding_timeout_seconds))
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(func, *args),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError as exc:
+            logger.warning("%s timed out after %.1fs", label, timeout)
+            raise AIResponseError(
+                f"{label} timed out after {timeout:g} seconds. "
+                "No bot was saved from this attempt. Try a smaller request, reduce optional features, "
+                "or switch OPENROUTER_CODING_MODEL to a faster coding model."
+            ) from exc
+
     def _generate_code_result(self, coding_brief: str) -> AITextResult:
         generate_result = getattr(self.generator, "generate_code_result", None)
         if callable(generate_result):
@@ -1054,7 +1106,9 @@ class BotService:
             coding_brief = await asyncio.to_thread(
                 self.generator.build_coding_brief, prompt, user_context=user_context
             )
-            generated = await asyncio.to_thread(self._generate_code_result, coding_brief)
+            generated = await self._run_coding_thread(
+                "Code generation", self._generate_code_result, coding_brief
+            )
         except AIResponseError as exc:
             logger.warning("Revision generation failed: bot_id=%s error=%s", bot_id, exc)
             self.db.update_bot_status(bot_id, "invalid")

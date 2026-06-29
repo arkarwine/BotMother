@@ -74,6 +74,7 @@ class Settings:
     openrouter_coding_reasoning_effort: str = "low"
     openrouter_exclude_reasoning: bool = True
     openrouter_request_timeout_seconds: int = 180
+    openrouter_coding_timeout_seconds: float = 360.0
     credits_enabled: bool = True
     credits_initial_free: int = 50
     credit_cost_new_bot: int = 10
@@ -106,7 +107,7 @@ class Settings:
             openrouter_interaction_model=(
                 os.getenv("OPENROUTER_INTERACTION_MODEL", "").strip()
                 or os.getenv("OPENROUTER_MODEL", "").strip()
-                or "google/gemini-2.5-pro"
+                or "google/gemini-2.5-flash"
             ),
             openrouter_coding_model=(
                 os.getenv("OPENROUTER_CODING_MODEL", "").strip()
@@ -142,6 +143,9 @@ class Settings:
             ),
             openrouter_request_timeout_seconds=int(
                 os.getenv("OPENROUTER_REQUEST_TIMEOUT_SECONDS", "180")
+            ),
+            openrouter_coding_timeout_seconds=float(
+                os.getenv("OPENROUTER_CODING_TIMEOUT_SECONDS", "360")
             ),
             credits_enabled=_bool_from_env(os.getenv("CREDITS_ENABLED"), True),
             credits_initial_free=int(os.getenv("CREDITS_INITIAL_FREE", "50")),

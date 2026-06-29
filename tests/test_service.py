@@ -1,5 +1,7 @@
 import asyncio
+from dataclasses import replace
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -130,6 +132,12 @@ class FakeGenerator:
         return self.edited_code
 
 
+class SlowCodeGenerator(FakeGenerator):
+    def generate_code(self, prompt: str, user_context: str = ""):
+        time.sleep(0.2)
+        return super().generate_code(prompt, user_context=user_context)
+
+
 def make_settings(tmp: str) -> Settings:
     return Settings(
         mother_bot_token="11111:mother_token_abcdefghijklmnopqrstuvwxyz",
@@ -169,6 +177,40 @@ def make_service(tmp: str, edited_code: str = NEW_BOT_CODE, env=None):
 
 
 class ServiceEditTests(unittest.TestCase):
+    def test_create_bot_code_generation_times_out_without_saving_bot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = replace(
+                make_settings(tmp),
+                openrouter_coding_timeout_seconds=0.05,
+            )
+            db = Database(settings.db_path)
+            db.initialize()
+            db.upsert_user(1, "owner", None, None)
+            runner = FakeRunner()
+            service = BotService(settings, db, SlowCodeGenerator(NEW_BOT_CODE), runner)
+            decision = AIDecision(
+                "code",
+                "Ready.",
+                (),
+                "Full English implementation prompt",
+                (),
+            )
+
+            result = asyncio.run(
+                service.create_bot_from_decision(
+                    1,
+                    100,
+                    "make slow bot",
+                    "12345:abcdefghijklmnopqrstuvwxyzABCDE",
+                    decision,
+                )
+            )
+
+            self.assertFalse(result.ok)
+            self.assertIn("timed out", result.message)
+            self.assertEqual(db.list_bots(), [])
+            self.assertEqual(runner.start_count, 0)
+
     def test_plan_new_bot_delegates_without_forced_localization_question(self):
         with tempfile.TemporaryDirectory() as tmp:
             service, _, _, generator, _ = make_service(tmp)

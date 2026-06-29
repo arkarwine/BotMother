@@ -10,6 +10,7 @@ from botmother.runner import (
     MAX_UNEXPECTED_SIGNAL_RESTARTS,
     ProcessManager,
     ProcessRecord,
+    bubblewrap_failure_hint,
     format_return_code,
     is_signal_exit,
 )
@@ -149,6 +150,26 @@ class RunnerTests(unittest.TestCase):
             self.assertIn("bot.py", cmd)
             self.assertNotIn("BOT_TOKEN", joined)
             self.assertNotIn("mother_token", joined)
+
+    def test_bwrap_preflight_command_does_not_request_uid_mapping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = make_settings(tmp)
+            db = Database(settings.db_path)
+            manager = ProcessManager(settings, db)
+            cmd = manager.build_bwrap_preflight_command()
+
+            self.assertIn("bwrap", cmd[0])
+            self.assertNotIn("--uid", cmd)
+            self.assertNotIn("--gid", cmd)
+            self.assertNotIn("--unshare-user", cmd)
+
+    def test_bwrap_uid_map_error_has_ubuntu_fix_hint(self):
+        hint = bubblewrap_failure_hint(
+            "bwrap: setting up uid map: Permission denied"
+        )
+
+        self.assertIn("kernel.unprivileged_userns_clone=1", hint)
+        self.assertIn("BOTMOTHER_REQUIRE_BWRAP=false", hint)
 
     def test_sandbox_binds_configured_venv_root_before_resolving_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:
