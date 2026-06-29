@@ -240,9 +240,14 @@ class ProcessManager:
         (bot_dir / "bot.py").write_text(revision["code"], encoding="utf-8")
         child_db = bot_dir / "bot.sqlite3"
         extra_env = self.db.get_bot_env_vars(bot_id)
-        env = self._child_env(bot["token"], "/app/bot.sqlite3" if self.settings.require_bwrap else str(child_db), extra_env)
+        sandbox_enabled = self.settings.require_bwrap
+        env = self._child_env(
+            bot["token"],
+            "/app/bot.sqlite3" if sandbox_enabled else str(child_db),
+            extra_env,
+        )
 
-        if self.settings.require_bwrap:
+        if sandbox_enabled:
             if not self._host_python_exists(self._resolve_python_bin()):
                 self.db.update_bot_status(bot_id, "python_missing")
                 raise RunnerError(
@@ -260,16 +265,34 @@ class ProcessManager:
                 await self._ensure_bwrap_usable()
             except RunnerError as exc:
                 logger.error("Bubblewrap unavailable: bot_id=%s error=%s", bot_id, exc)
-                self.db.update_bot_status(bot_id, "sandbox_unavailable")
                 self.db.add_log(
                     bot_id,
                     "system",
                     f"Bubblewrap unavailable: {exc}",
                     self.settings.log_tail_rows,
                 )
-                raise
-            command = self.build_sandbox_command(bot_dir)
-            cwd = None
+                if not self.settings.bwrap_fallback_plain:
+                    self.db.update_bot_status(bot_id, "sandbox_unavailable")
+                    raise
+                sandbox_enabled = False
+                env = self._child_env(bot["token"], str(child_db), extra_env)
+                self.db.add_log(
+                    bot_id,
+                    "system",
+                    "Sandbox disabled for this launch because "
+                    "BOTMOTHER_BWRAP_FALLBACK_PLAIN=true. "
+                    "Use only for trusted local testing.",
+                    self.settings.log_tail_rows,
+                )
+                logger.warning(
+                    "Falling back to unsandboxed child launch: bot_id=%s", bot_id
+                )
+            if sandbox_enabled:
+                command = self.build_sandbox_command(bot_dir)
+                cwd = None
+            else:
+                command = self.build_plain_command()
+                cwd = str(bot_dir)
         else:
             command = self.build_plain_command()
             cwd = str(bot_dir)
@@ -278,7 +301,7 @@ class ProcessManager:
         logger.info(
             "Starting child bot: bot_id=%s sandbox=%s cwd=%s command=%s",
             bot_id,
-            self.settings.require_bwrap,
+            sandbox_enabled,
             cwd or "-",
             command,
         )

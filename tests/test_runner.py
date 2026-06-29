@@ -10,6 +10,7 @@ from botmother.runner import (
     MAX_UNEXPECTED_SIGNAL_RESTARTS,
     ProcessManager,
     ProcessRecord,
+    RunnerError,
     bubblewrap_failure_hint,
     format_return_code,
     is_signal_exit,
@@ -41,6 +42,22 @@ class FakeSignalProcess:
 
     async def wait(self) -> int:
         return -2
+
+
+class EmptyStream:
+    async def readline(self):
+        return b""
+
+
+class FakeLaunchProcess:
+    pid = 4321
+    returncode = None
+    stdout = EmptyStream()
+    stderr = EmptyStream()
+
+    async def wait(self) -> int:
+        await asyncio.sleep(10)
+        return 0
 
 
 def create_running_bot(db: Database, settings: Settings) -> int:
@@ -170,6 +187,60 @@ class RunnerTests(unittest.TestCase):
 
         self.assertIn("kernel.unprivileged_userns_clone=1", hint)
         self.assertIn("BOTMOTHER_REQUIRE_BWRAP=false", hint)
+
+    def test_bwrap_preflight_failure_can_fallback_to_plain_launch(self):
+        async def run_case():
+            with tempfile.TemporaryDirectory() as tmp:
+                settings = make_settings(tmp)
+                settings = Settings(
+                    mother_bot_token=settings.mother_bot_token,
+                    openrouter_api_key=settings.openrouter_api_key,
+                    openrouter_model=settings.openrouter_model,
+                    openrouter_interaction_model=settings.openrouter_interaction_model,
+                    openrouter_coding_model=settings.openrouter_coding_model,
+                    openrouter_base_url=settings.openrouter_base_url,
+                    openrouter_app_name=settings.openrouter_app_name,
+                    openrouter_app_url=settings.openrouter_app_url,
+                    db_path=settings.db_path,
+                    workdir=settings.workdir,
+                    owner_ids=settings.owner_ids,
+                    python_bin=settings.python_bin,
+                    bwrap_bin=settings.bwrap_bin,
+                    require_bwrap=True,
+                    bwrap_fallback_plain=True,
+                )
+                db = Database(settings.db_path)
+                db.initialize()
+                db.upsert_user(1, "owner", None, None)
+                bot_id = db.create_bot(
+                    1,
+                    100,
+                    "Echo",
+                    "make echo",
+                    "12345:abcdefghijklmnopqrstuvwxyzABCDE",
+                    settings.workdir / "1",
+                )
+                db.add_revision(bot_id, "make echo", "print('ok')", "ok", None)
+                manager = ProcessManager(settings, db)
+
+                async def fail_preflight():
+                    raise RunnerError("bwrap: setting up uid map: Permission denied")
+
+                manager._ensure_bwrap_usable = fail_preflight
+                manager._host_python_exists = lambda python_bin: True
+                with patch("botmother.runner.shutil.which", return_value="/usr/bin/bwrap"):
+                    with patch(
+                        "asyncio.create_subprocess_exec",
+                        return_value=FakeLaunchProcess(),
+                    ) as mocked:
+                        await manager.start_bot(bot_id)
+
+                self.assertEqual(mocked.call_args.args[:2], (settings.python_bin, "bot.py"))
+                self.assertTrue(
+                    any("Sandbox disabled" in row["line"] for row in db.get_logs(bot_id, 20))
+                )
+
+        asyncio.run(run_case())
 
     def test_sandbox_binds_configured_venv_root_before_resolving_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:

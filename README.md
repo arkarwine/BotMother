@@ -59,6 +59,7 @@ OWNER_IDS=123456789
 PYTHON_BIN=python3
 BWRAP_BIN=bwrap
 BOTMOTHER_REQUIRE_BWRAP=true
+BOTMOTHER_BWRAP_FALLBACK_PLAIN=false
 BOTMOTHER_LOG_LEVEL=INFO
 BOTMOTHER_LOG_FILE=./data/botmother.log
 CREDITS_ENABLED=true
@@ -87,7 +88,7 @@ sudo sysctl -w kernel.unprivileged_userns_clone=1
 printf 'kernel.unprivileged_userns_clone=1\n' | sudo tee /etc/sysctl.d/99-botmother-userns.conf
 ```
 
-For trusted local testing only, `BOTMOTHER_REQUIRE_BWRAP=false` bypasses the sandbox. Do not use that for untrusted public bot creation.
+For trusted local testing only, `BOTMOTHER_REQUIRE_BWRAP=false` bypasses the sandbox. You can also keep `BOTMOTHER_REQUIRE_BWRAP=true` and set `BOTMOTHER_BWRAP_FALLBACK_PLAIN=true` to try Bubblewrap first, then launch unsandboxed only when the host denies Bubblewrap user namespaces. Do not use either unsandboxed option for untrusted public bot creation.
 
 ## Telegram Controls
 

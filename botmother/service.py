@@ -326,13 +326,17 @@ class BotService:
         token: str,
         decision: AIDecision,
         user_context: str = "",
+        on_delta: Callable[[str], None] | None = None,
     ) -> OperationResult:
         if decision.type != "code" or not decision.code:
             return OperationResult(False, "AI did not provide code yet.")
         coding_brief = decision.code
         try:
             generated = await self._run_coding_thread(
-                "Code generation", self._generate_code_result, coding_brief
+                "Code generation",
+                self._generate_code_result,
+                coding_brief,
+                on_delta,
             )
         except AIResponseError as exc:
             logger.warning("Create generation failed before save: %s", exc)
@@ -557,6 +561,7 @@ class BotService:
         edit_prompt: str,
         decision: AIDecision,
         user_context: str = "",
+        on_delta: Callable[[str], None] | None = None,
     ) -> OperationResult:
         if not self.can_manage(user_id, bot_id):
             logger.info("Denied edit: user_id=%s bot_id=%s", user_id, bot_id)
@@ -574,7 +579,11 @@ class BotService:
         current_code = str(latest_revision["code"]) if latest_revision is not None else ""
         try:
             generated = await self._run_coding_thread(
-                "Code editing", self._edit_code_result, current_code, decision.code
+                "Code editing",
+                self._edit_code_result,
+                current_code,
+                decision.code,
+                on_delta,
             )
         except AIResponseError as exc:
             logger.warning("Prompt edit generation failed: bot_id=%s error=%s", bot_id, exc)
@@ -986,17 +995,42 @@ class BotService:
                 "or switch OPENROUTER_CODING_MODEL to a faster coding model."
             ) from exc
 
-    def _generate_code_result(self, coding_brief: str) -> AITextResult:
+    def _generate_code_result(
+        self, coding_brief: str, on_delta: Callable[[str], None] | None = None
+    ) -> AITextResult:
         generate_result = getattr(self.generator, "generate_code_result", None)
         if callable(generate_result):
-            return generate_result(coding_brief)
-        return AITextResult(self.generator.generate_code(coding_brief))
+            try:
+                return generate_result(coding_brief, on_delta=on_delta)
+            except TypeError:
+                result = generate_result(coding_brief)
+                if result.text and on_delta is not None:
+                    on_delta(result.text)
+                return result
+        code = self.generator.generate_code(coding_brief)
+        if code and on_delta is not None:
+            on_delta(code)
+        return AITextResult(code)
 
-    def _edit_code_result(self, current_code: str, edit_brief: str) -> AITextResult:
+    def _edit_code_result(
+        self,
+        current_code: str,
+        edit_brief: str,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> AITextResult:
         edit_result = getattr(self.generator, "edit_code_result", None)
         if callable(edit_result):
-            return edit_result(current_code, edit_brief)
-        return AITextResult(self.generator.edit_code(current_code, edit_brief))
+            try:
+                return edit_result(current_code, edit_brief, on_delta=on_delta)
+            except TypeError:
+                result = edit_result(current_code, edit_brief)
+                if result.text and on_delta is not None:
+                    on_delta(result.text)
+                return result
+        code = self.generator.edit_code(current_code, edit_brief)
+        if code and on_delta is not None:
+            on_delta(code)
+        return AITextResult(code)
 
     def _answer_bot_question_result(
         self,

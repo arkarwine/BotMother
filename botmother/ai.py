@@ -1411,7 +1411,10 @@ class OpenRouterCodeGenerator:
         return self.generate_code_result(coding_brief, user_context=user_context).text
 
     def generate_code_result(
-        self, coding_brief: str, user_context: str = ""
+        self,
+        coding_brief: str,
+        user_context: str = "",
+        on_delta: Callable[[str], None] | None = None,
     ) -> AITextResult:
         logger.info(
             "Generating child bot code: model=%s implementation_prompt_chars=%s",
@@ -1423,7 +1426,15 @@ class OpenRouterCodeGenerator:
             "Return only Python source.\n\n"
             f"English implementation prompt:\n{coding_brief.strip()}"
         )
-        result = self._chat_result(SYSTEM_PROMPT, prompt, model=self.coding_model)
+        if on_delta is not None:
+            result = self._chat_stream_result(
+                SYSTEM_PROMPT,
+                prompt,
+                model=self.coding_model,
+                on_delta=on_delta,
+            )
+        else:
+            result = self._chat_result(SYSTEM_PROMPT, prompt, model=self.coding_model)
         if result.finished_by_token_limit:
             logger.error(
                 "OpenRouter truncated generated code: finish_reason=%s native_finish_reason=%s usage=%s chars=%s",
@@ -1450,7 +1461,11 @@ class OpenRouterCodeGenerator:
         ).text
 
     def edit_code_result(
-        self, current_code: str, edit_brief: str, user_context: str = ""
+        self,
+        current_code: str,
+        edit_brief: str,
+        user_context: str = "",
+        on_delta: Callable[[str], None] | None = None,
     ) -> AITextResult:
         logger.info(
             "Editing child bot code: model=%s code_chars=%s implementation_prompt_chars=%s",
@@ -1466,7 +1481,15 @@ class OpenRouterCodeGenerator:
             "```\n\n"
             f"English edit implementation prompt:\n{edit_brief.strip()}"
         )
-        result = self._chat_result(SYSTEM_PROMPT, prompt, model=self.coding_model)
+        if on_delta is not None:
+            result = self._chat_stream_result(
+                SYSTEM_PROMPT,
+                prompt,
+                model=self.coding_model,
+                on_delta=on_delta,
+            )
+        else:
+            result = self._chat_result(SYSTEM_PROMPT, prompt, model=self.coding_model)
         if result.finished_by_token_limit:
             logger.error(
                 "OpenRouter truncated edited code: finish_reason=%s native_finish_reason=%s usage=%s chars=%s",

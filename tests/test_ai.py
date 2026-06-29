@@ -229,6 +229,34 @@ class AIDecisionTests(unittest.TestCase):
         self.assertTrue(payload["stream"])
         self.assertEqual(payload["stream_options"], {"include_usage": True})
 
+    def test_generate_code_result_streams_code_deltas(self):
+        generator = OpenRouterCodeGenerator(
+            api_key="sk-test",
+            model="fallback-model",
+            coding_model="coding-model",
+        )
+        lines = [
+            'data: {"id":"abc","model":"coding-model:nitro","choices":[{"delta":{"content":"print"}}]}\n\n',
+            'data: {"choices":[{"delta":{"content":"(1)"}}]}\n\n',
+            'data: {"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5},"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+            "data: [DONE]\n\n",
+        ]
+        deltas = []
+
+        with patch(
+            "urllib.request.urlopen", return_value=FakeStreamingHTTPResponse(lines)
+        ) as mocked:
+            result = generator.generate_code_result(
+                "make tiny bot", on_delta=deltas.append
+            )
+
+        self.assertEqual(result.text, "print(1)")
+        self.assertEqual(deltas, ["print", "(1)"])
+        request = mocked.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["model"], "coding-model:nitro")
+        self.assertTrue(payload["stream"])
+
     def test_json_decision_streams_only_visible_text_after_delimiter(self):
         generator = OpenRouterCodeGenerator(api_key="sk-test", model="test-model")
         json_text = json.dumps(
