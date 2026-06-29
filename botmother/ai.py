@@ -447,6 +447,71 @@ def format_answer_history(answer_history: list[dict[str, Any]]) -> str:
     return "\n\n".join(parts)
 
 
+def _extract_message_content(message: Any) -> str:
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+                elif isinstance(item.get("content"), str):
+                    parts.append(str(item["content"]))
+        return "\n".join(part.strip() for part in parts if part.strip()).strip()
+    return ""
+
+
+def _json_preview(value: Any, limit: int = 1200) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        text = repr(value)
+    return text[:limit]
+
+
+def _text_len(value: Any) -> int:
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, list):
+        return len(_extract_message_content({"content": value}))
+    return 0
+
+
+def _empty_response_diagnostics(
+    data: dict[str, Any], choice: dict[str, Any], message: dict[str, Any], model: str
+) -> dict[str, Any]:
+    refusal = message.get("refusal")
+    tool_calls = message.get("tool_calls")
+    reasoning_details = message.get("reasoning_details")
+    return {
+        "id": data.get("id"),
+        "requested_model": model,
+        "returned_model": data.get("model"),
+        "finish_reason": choice.get("finish_reason"),
+        "native_finish_reason": choice.get("native_finish_reason"),
+        "message_keys": sorted(str(key) for key in message.keys()),
+        "content_type": type(message.get("content")).__name__,
+        "content_chars": _text_len(message.get("content")),
+        "reasoning_chars": _text_len(message.get("reasoning")),
+        "reasoning_details_count": (
+            len(reasoning_details)
+            if isinstance(reasoning_details, list)
+            else 0
+        ),
+        "refusal": refusal[:300] if isinstance(refusal, str) else refusal,
+        "tool_call_count": len(tool_calls) if isinstance(tool_calls, list) else 0,
+        "usage": data.get("usage"),
+        "openrouter_metadata": data.get("openrouter_metadata"),
+    }
+
+
 @dataclass
 class OpenRouterCodeGenerator:
     api_key: str
@@ -456,12 +521,45 @@ class OpenRouterCodeGenerator:
     base_url: str = "https://openrouter.ai/api/v1"
     app_name: str = "BotMother"
     app_url: str = ""
+    interaction_max_tokens: int = 6000
+    coding_max_tokens: int = 24000
+    interaction_reasoning_effort: str = "minimal"
+    coding_reasoning_effort: str = "low"
+    exclude_reasoning: bool = True
+    request_timeout_seconds: int = 180
 
     def __post_init__(self) -> None:
         self.base_url = self.base_url.rstrip("/")
         self.interaction_model = self.interaction_model or self.model
         self.coding_model = self.coding_model or self.model
         self.model = self.model or self.interaction_model or self.coding_model
+
+    def _model_role(self, model: str) -> str:
+        return "coding" if model == self.coding_model else "interaction"
+
+    def _max_tokens_for_model(self, model: str) -> int:
+        if self._model_role(model) == "coding":
+            return max(1024, self.coding_max_tokens)
+        return max(512, self.interaction_max_tokens)
+
+    def _reasoning_effort_for_model(self, model: str) -> str:
+        if self._model_role(model) == "coding":
+            return self.coding_reasoning_effort.strip()
+        return self.interaction_reasoning_effort.strip()
+
+    def _build_extra_payload(self, model: str) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "max_completion_tokens": self._max_tokens_for_model(model),
+        }
+        effort = self._reasoning_effort_for_model(model)
+        reasoning: dict[str, Any] = {}
+        if self.exclude_reasoning:
+            reasoning["exclude"] = True
+        if effort:
+            reasoning["effort"] = effort
+        if reasoning:
+            payload["reasoning"] = reasoning
+        return payload
 
     def _chat(
         self,
@@ -470,13 +568,15 @@ class OpenRouterCodeGenerator:
         json_mode: bool = False,
         model: str | None = None,
     ) -> str:
+        resolved_model = model or self.model
         payload: dict[str, Any] = {
-            "model": model or self.model,
+            "model": resolved_model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         }
+        payload.update(self._build_extra_payload(resolved_model))
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
 
@@ -484,10 +584,21 @@ class OpenRouterCodeGenerator:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "X-Title": self.app_name,
+            "X-OpenRouter-Metadata": "enabled",
         }
         if self.app_url:
             headers["HTTP-Referer"] = self.app_url
 
+        logger.debug(
+            "OpenRouter request: model=%s role=%s json_mode=%s max_completion_tokens=%s reasoning=%s system_chars=%s user_chars=%s",
+            resolved_model,
+            self._model_role(resolved_model),
+            json_mode,
+            payload.get("max_completion_tokens"),
+            payload.get("reasoning"),
+            len(system_prompt),
+            len(user_prompt),
+        )
         request = urllib.request.Request(
             f"{self.base_url}/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
@@ -495,7 +606,9 @@ class OpenRouterCodeGenerator:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=180) as response:
+            with urllib.request.urlopen(
+                request, timeout=self.request_timeout_seconds
+            ) as response:
                 body = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:1000]
@@ -507,13 +620,38 @@ class OpenRouterCodeGenerator:
 
         try:
             data = json.loads(body)
-            content = data["choices"][0]["message"]["content"]
+            if not isinstance(data, dict):
+                raise TypeError("OpenRouter response JSON must be an object.")
+            choice = data["choices"][0]
+            if not isinstance(choice, dict):
+                raise TypeError("OpenRouter choice must be an object.")
+            message = choice.get("message", {})
+            if not isinstance(message, dict):
+                message = {}
+            content = _extract_message_content(message)
+            if not content and isinstance(choice.get("text"), str):
+                content = choice["text"].strip()
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             logger.error("OpenRouter returned an unexpected response: %s", body[:1000])
             raise RuntimeError("OpenRouter returned an unexpected response.") from exc
-        if not isinstance(content, str) or not content.strip():
-            logger.error("OpenRouter returned an empty response")
-            raise RuntimeError("OpenRouter returned an empty response.")
+        if not content:
+            diagnostics = _empty_response_diagnostics(
+                data, choice, message, resolved_model
+            )
+            logger.warning(
+                "OpenRouter returned no visible assistant content: %s",
+                _json_preview(diagnostics),
+            )
+            return ""
+        logger.debug(
+            "OpenRouter response: id=%s requested_model=%s returned_model=%s finish_reason=%s content_chars=%s usage=%s",
+            data.get("id"),
+            resolved_model,
+            data.get("model"),
+            choice.get("finish_reason"),
+            len(content),
+            data.get("usage"),
+        )
         return content
 
     def _generate_json_text(self, prompt: str) -> str:
@@ -695,7 +833,7 @@ class OpenRouterCodeGenerator:
         if text and text.strip():
             return text.strip()
         logger.error("OpenRouter returned an empty implementation prompt")
-        raise RuntimeError("OpenRouter returned an empty implementation prompt.")
+        raise AIResponseError("OpenRouter returned an empty implementation prompt.")
 
     def decide_new_bot(
         self,
@@ -801,7 +939,7 @@ class OpenRouterCodeGenerator:
             logger.info("OpenRouter returned generated code: chars=%s", len(text))
             return text
         logger.error("OpenRouter returned an empty response")
-        raise RuntimeError("OpenRouter returned an empty response.")
+        raise AIResponseError("OpenRouter returned an empty code response.")
 
     def edit_code(
         self, current_code: str, edit_brief: str, user_context: str = ""
@@ -825,7 +963,7 @@ class OpenRouterCodeGenerator:
             logger.info("OpenRouter returned edited code: chars=%s", len(text))
             return text
         logger.error("OpenRouter returned an empty edit response")
-        raise RuntimeError("OpenRouter returned an empty edit response.")
+        raise AIResponseError("OpenRouter returned an empty edit response.")
 
     def refine_code_for_deploy(
         self,
@@ -871,7 +1009,7 @@ class OpenRouterCodeGenerator:
             )
             return text
         logger.error("OpenRouter returned an empty refinement response: layer=%s", layer)
-        raise RuntimeError("OpenRouter returned an empty refinement response.")
+        raise AIResponseError("OpenRouter returned an empty refinement response.")
 
     def answer_bot_question(self, bot_context: str, question: str) -> str:
         logger.info(
@@ -888,7 +1026,7 @@ class OpenRouterCodeGenerator:
             logger.info("OpenRouter returned bot answer: chars=%s", len(text))
             return text.strip()
         logger.error("OpenRouter returned an empty bot answer")
-        raise RuntimeError("OpenRouter returned an empty answer.")
+        raise AIResponseError("OpenRouter returned an empty answer.")
 
 
 GeminiCodeGenerator = OpenRouterCodeGenerator

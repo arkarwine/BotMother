@@ -45,6 +45,12 @@ OPENROUTER_CODING_MODEL=deepseek/deepseek-v4-pro
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_APP_NAME=BotMother
 OPENROUTER_APP_URL=
+OPENROUTER_INTERACTION_MAX_TOKENS=6000
+OPENROUTER_CODING_MAX_TOKENS=24000
+OPENROUTER_INTERACTION_REASONING_EFFORT=minimal
+OPENROUTER_CODING_REASONING_EFFORT=low
+OPENROUTER_EXCLUDE_REASONING=true
+OPENROUTER_REQUEST_TIMEOUT_SECONDS=180
 BOTMOTHER_DB=./data/botmother.sqlite3
 BOTMOTHER_WORKDIR=./data/bots
 OWNER_IDS=123456789
@@ -169,6 +175,9 @@ BotMother uses OpenRouter and can route different AI jobs to different models:
 - `OPENROUTER_INTERACTION_MODEL` handles user-facing planning, follow-up questions, readiness checks, and Ask Bot answers.
 - `OPENROUTER_CODING_MODEL` handles raw Python generation, prompt edits, and refinement layers.
 - `OPENROUTER_MODEL` is an optional fallback when a role-specific model is not set.
+- `OPENROUTER_INTERACTION_MAX_TOKENS` and `OPENROUTER_CODING_MAX_TOKENS` set explicit completion budgets so routed providers do not silently use tiny defaults.
+- `OPENROUTER_*_REASONING_EFFORT` controls how much reasoning budget OpenRouter should request for each role; use an empty value to let the provider choose.
+- `OPENROUTER_EXCLUDE_REASONING=true` keeps hidden reasoning out of the returned assistant message and logs.
 
 For New Bot/Edit/Revise, the interaction model first turns the user's request, answers, locale, and relevant requester context into a full English implementation prompt. The coding model receives that Gemini-written prompt instead of raw chat text, so it still gets complete translated context without reading the original conversation directly.
 
@@ -177,6 +186,10 @@ The default performance/price split is:
 ```env
 OPENROUTER_INTERACTION_MODEL=google/gemini-2.5-pro
 OPENROUTER_CODING_MODEL=deepseek/deepseek-v4-pro
+OPENROUTER_INTERACTION_MAX_TOKENS=6000
+OPENROUTER_CODING_MAX_TOKENS=24000
+OPENROUTER_INTERACTION_REASONING_EFFORT=minimal
+OPENROUTER_CODING_REASONING_EFFORT=low
 ```
 
 For existing deployments, `GEMINI_API_KEY` and `GEMINI_MODEL` are still accepted as temporary compatibility fallbacks, but new installs should use the OpenRouter variables above.

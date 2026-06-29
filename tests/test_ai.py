@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest.mock import patch
 
@@ -41,6 +42,8 @@ def make_generator(texts):
 
 
 class FakeHTTPResponse:
+    body = b'{"choices":[{"message":{"content":"hello"}}]}'
+
     def __enter__(self):
         return self
 
@@ -48,7 +51,12 @@ class FakeHTTPResponse:
         return False
 
     def read(self):
-        return b'{"choices":[{"message":{"content":"hello"}}]}'
+        return self.body
+
+
+class FakeHTTPResponseWithBody(FakeHTTPResponse):
+    def __init__(self, body: bytes):
+        self.body = body
 
 
 class AIDecisionTests(unittest.TestCase):
@@ -68,11 +76,53 @@ class AIDecisionTests(unittest.TestCase):
         self.assertEqual(text, "hello")
         request = mocked.call_args.args[0]
         body = request.data.decode("utf-8")
+        payload = json.loads(body)
         self.assertEqual(request.headers["Authorization"], "Bearer sk-test")
         self.assertEqual(request.headers["X-title"], "BotMother tests")
         self.assertEqual(request.headers["Http-referer"], "https://example.test")
-        self.assertIn('"model": "fallback-model"', body)
-        self.assertIn('"response_format": {"type": "json_object"}', body)
+        self.assertEqual(request.headers["X-openrouter-metadata"], "enabled")
+        self.assertEqual(payload["model"], "fallback-model")
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertEqual(payload["max_completion_tokens"], 6000)
+        self.assertEqual(payload["reasoning"], {"exclude": True, "effort": "minimal"})
+
+    def test_openrouter_chat_uses_coding_budget_for_coding_model(self):
+        generator = OpenRouterCodeGenerator(
+            api_key="sk-test",
+            model="fallback-model",
+            interaction_model="interaction-model",
+            coding_model="coding-model",
+            interaction_max_tokens=1111,
+            coding_max_tokens=2222,
+            interaction_reasoning_effort="minimal",
+            coding_reasoning_effort="low",
+        )
+
+        with patch("urllib.request.urlopen", return_value=FakeHTTPResponse()) as mocked:
+            generator._chat("system", "user", model="coding-model")
+
+        request = mocked.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["model"], "coding-model")
+        self.assertEqual(payload["max_completion_tokens"], 2222)
+        self.assertEqual(payload["reasoning"], {"exclude": True, "effort": "low"})
+
+    def test_openrouter_chat_normalizes_list_content(self):
+        generator = OpenRouterCodeGenerator(api_key="sk-test", model="test-model")
+        body = b'{"choices":[{"message":{"content":[{"type":"text","text":"hello"},{"type":"text","text":"world"}]}}]}'
+
+        with patch("urllib.request.urlopen", return_value=FakeHTTPResponseWithBody(body)):
+            text = generator._chat("system", "user")
+
+        self.assertEqual(text, "hello\nworld")
+
+    def test_empty_json_response_falls_back_instead_of_crashing(self):
+        generator = make_generator(["", "", ""])
+
+        decision = generator._generate_json_decision("Original newbot prompt")
+
+        self.assertTrue(decision.needs_questions)
+        self.assertEqual(decision.questions[0].id, "clarify_request")
 
     def test_model_routing_uses_interaction_and_coding_models(self):
         generator = make_generator(

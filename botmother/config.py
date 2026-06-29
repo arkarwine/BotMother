@@ -68,6 +68,12 @@ class Settings:
     python_bin: str
     bwrap_bin: str
     require_bwrap: bool
+    openrouter_interaction_max_tokens: int = 6000
+    openrouter_coding_max_tokens: int = 24000
+    openrouter_interaction_reasoning_effort: str = "minimal"
+    openrouter_coding_reasoning_effort: str = "low"
+    openrouter_exclude_reasoning: bool = True
+    openrouter_request_timeout_seconds: int = 180
     credits_enabled: bool = True
     credits_initial_free: int = 50
     credit_cost_new_bot: int = 10
@@ -119,6 +125,24 @@ class Settings:
             python_bin=os.getenv("PYTHON_BIN", "python3").strip() or "python3",
             bwrap_bin=os.getenv("BWRAP_BIN", "bwrap").strip() or "bwrap",
             require_bwrap=_bool_from_env(os.getenv("BOTMOTHER_REQUIRE_BWRAP"), True),
+            openrouter_interaction_max_tokens=int(
+                os.getenv("OPENROUTER_INTERACTION_MAX_TOKENS", "6000")
+            ),
+            openrouter_coding_max_tokens=int(
+                os.getenv("OPENROUTER_CODING_MAX_TOKENS", "24000")
+            ),
+            openrouter_interaction_reasoning_effort=os.getenv(
+                "OPENROUTER_INTERACTION_REASONING_EFFORT", "minimal"
+            ).strip(),
+            openrouter_coding_reasoning_effort=os.getenv(
+                "OPENROUTER_CODING_REASONING_EFFORT", "low"
+            ).strip(),
+            openrouter_exclude_reasoning=_bool_from_env(
+                os.getenv("OPENROUTER_EXCLUDE_REASONING"), True
+            ),
+            openrouter_request_timeout_seconds=int(
+                os.getenv("OPENROUTER_REQUEST_TIMEOUT_SECONDS", "180")
+            ),
             credits_enabled=_bool_from_env(os.getenv("CREDITS_ENABLED"), True),
             credits_initial_free=int(os.getenv("CREDITS_INITIAL_FREE", "50")),
             credit_cost_new_bot=int(os.getenv("CREDIT_COST_NEW_BOT", "10")),

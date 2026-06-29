@@ -41,6 +41,12 @@ def main() -> None:
         base_url=settings.openrouter_base_url,
         app_name=settings.openrouter_app_name,
         app_url=settings.openrouter_app_url,
+        interaction_max_tokens=settings.openrouter_interaction_max_tokens,
+        coding_max_tokens=settings.openrouter_coding_max_tokens,
+        interaction_reasoning_effort=settings.openrouter_interaction_reasoning_effort,
+        coding_reasoning_effort=settings.openrouter_coding_reasoning_effort,
+        exclude_reasoning=settings.openrouter_exclude_reasoning,
+        request_timeout_seconds=settings.openrouter_request_timeout_seconds,
     )
     runner = ProcessManager(settings=settings, db=db)
     service = BotService(settings=settings, db=db, generator=generator, runner=runner)
