@@ -1142,6 +1142,7 @@ def build_application(token: str, db: Database, service: BotService):
         received_chars = 0
         streamed_parts: list[str] = []
         last_rendered = ""
+        draft_ok = True
         while not task.done() or (stream_queue is not None and not stream_queue.empty()):
             if stream_queue is None:
                 await asyncio.sleep(interval_seconds)
@@ -1168,7 +1169,12 @@ def build_application(token: str, db: Database, service: BotService):
                     max_tokens=max_tokens,
                 )
                 if rendered != last_rendered:
-                    await edit_message_plain(progress_message, rendered)
+                    if draft_ok:
+                        draft_ok = await send_plain_draft(
+                            update, context, title_key, rendered
+                        )
+                    if not draft_ok:
+                        await edit_message_plain(progress_message, rendered)
                     last_rendered = rendered
             else:
                 rendered = progress_text(
@@ -1946,7 +1952,8 @@ def build_application(token: str, db: Database, service: BotService):
                 draft_ok = await send_plain_draft(
                     update, context, title_key, streamed_text
                 )
-            await edit_message_plain(progress_message, streamed_text)
+            if not draft_ok:
+                await edit_message_plain(progress_message, streamed_text)
 
         result = await result_task
         logger.info(
