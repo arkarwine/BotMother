@@ -1051,6 +1051,12 @@ def build_application(token: str, db: Database, service: BotService):
             message, format_result_html(text), reply_markup=reply_markup
         )
 
+    async def delete_message_safely(message: Any) -> None:
+        try:
+            await message.delete()
+        except Exception:
+            logger.debug("Could not delete temporary progress message", exc_info=True)
+
     async def finalize_streamed_html(
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
@@ -1058,9 +1064,8 @@ def build_application(token: str, db: Database, service: BotService):
         text: str,
         reply_markup=None,
     ):
-        context.user_data.pop("_botmother_stream_used_draft", None)
-        await edit_message_html(progress_message, text, reply_markup=reply_markup)
-        return progress_message
+        await delete_message_safely(progress_message)
+        return await reply_html(update.effective_message, text)
 
     async def finalize_streamed_result(
         update: Update,
@@ -1093,10 +1098,6 @@ def build_application(token: str, db: Database, service: BotService):
 
     async def reply_home(message, text: str, locale: str = "en") -> None:
         await reply_html(message, text, reply_markup=main_reply_keyboard(locale))
-
-    def progress_draft_id(update: Update, title_key: str) -> int:
-        message_id = getattr(update.effective_message, "message_id", None) or 1
-        return max(1, (int(message_id) * 1000) + 1)
 
     def progress_tokens_html(
         update: Update, max_tokens: int | None, received_chars: int = 0
@@ -1132,6 +1133,43 @@ def build_application(token: str, db: Database, service: BotService):
         stripped = text.strip()
         return draft_preview_text(stripped)
 
+    def new_stream_draft_id(context: ContextTypes.DEFAULT_TYPE) -> int:
+        draft_id = uuid.uuid4().int % 2_147_483_647
+        if draft_id == 0:
+            draft_id = 1
+        context.user_data["_botmother_last_draft_id"] = draft_id
+        return draft_id
+
+    async def send_plain_draft(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        text: str,
+        *,
+        draft_id: int,
+        parse_mode: str | None = None,
+    ) -> bool:
+        try:
+            message_thread_id = getattr(
+                update.effective_message, "message_thread_id", None
+            )
+            await context.bot.send_message_draft(
+                chat_id=_chat_id(update),
+                draft_id=draft_id,
+                text=draft_preview_text(text),
+                message_thread_id=message_thread_id,
+                parse_mode=parse_mode,
+            )
+            logger.debug(
+                "Telegram draft stream tick accepted: chat_id=%s draft_id=%s chars=%s",
+                _chat_id(update),
+                draft_id,
+                len(text),
+            )
+            return True
+        except Exception:
+            logger.debug("Telegram draft stream update failed", exc_info=True)
+            return False
+
     def code_tail_text(text: str, max_lines: int = 14, max_chars: int = 2600) -> str:
         lines = text.strip().splitlines()
         tail = "\n".join(lines[-max_lines:]) if lines else text.strip()
@@ -1158,6 +1196,25 @@ def build_application(token: str, db: Database, service: BotService):
             + "</pre>"
         )
 
+    def code_tail_draft_text(
+        update: Update,
+        title_key: str,
+        detail_key: str,
+        elapsed_seconds: int,
+        text: str,
+    ) -> str:
+        return (
+            progress_text(
+                update,
+                tr(update, title_key),
+                tr(update, detail_key),
+                elapsed_seconds,
+            )
+            + "\n\nLatest generated output:\n<pre>"
+            + escape(code_tail_text(text))
+            + "</pre>"
+        )
+
     async def send_coding_brief_file(
         update: Update,
         brief: str,
@@ -1175,23 +1232,6 @@ def build_application(token: str, db: Database, service: BotService):
             caption=tr(update, title_key),
             parse_mode=ParseMode.HTML,
         )
-
-    async def send_plain_draft(
-        update: Update,
-        context: ContextTypes.DEFAULT_TYPE,
-        title_key: str,
-        text: str,
-    ) -> bool:
-        try:
-            await context.bot.send_message_draft(
-                chat_id=_chat_id(update),
-                draft_id=progress_draft_id(update, title_key),
-                text=draft_preview_text(text),
-            )
-            return True
-        except Exception as exc:
-            logger.warning("Telegram plain draft streaming failed: %s", exc)
-            return False
 
     def drain_stream_queue(
         stream_queue: asyncio.Queue[str], streamed_parts: list[str]
@@ -1225,8 +1265,8 @@ def build_application(token: str, db: Database, service: BotService):
         received_chars = 0
         streamed_parts: list[str] = []
         last_rendered = ""
-        draft_ok = True
-        stream_used_draft = False
+        draft_interval = 3.0 if stream_mode == "code_tail" else 0.5
+        draft_id = new_stream_draft_id(context)
         while not task.done() or (stream_queue is not None and not stream_queue.empty()):
             if stream_queue is None:
                 await asyncio.sleep(interval_seconds)
@@ -1241,7 +1281,11 @@ def build_application(token: str, db: Database, service: BotService):
             if task.done() and (stream_queue is None or stream_queue.empty()):
                 break
             now = loop.time()
-            update_interval = 0.25 if stream_visible_text and received_chars else 1.0 if received_chars else interval_seconds
+            update_interval = (
+                draft_interval
+                if stream_visible_text and received_chars
+                else interval_seconds
+            )
             if now - last_update < update_interval:
                 continue
             elapsed = int(loop.time() - started)
@@ -1249,7 +1293,7 @@ def build_application(token: str, db: Database, service: BotService):
             visible_preview = raw_stream.strip() if stream_visible_text else ""
             if visible_preview:
                 if stream_mode == "code_tail":
-                    rendered = code_tail_progress_text(
+                    rendered = code_tail_draft_text(
                         update,
                         title_key,
                         detail_key,
@@ -1263,15 +1307,18 @@ def build_application(token: str, db: Database, service: BotService):
                         max_tokens=max_tokens,
                     )
                 if rendered != last_rendered:
-                    if draft_ok and stream_mode != "code_tail":
-                        draft_ok = await send_plain_draft(
-                            update, context, title_key, rendered
-                        )
-                        stream_used_draft = stream_used_draft or draft_ok
                     if stream_mode == "code_tail":
-                        await edit_message_html(progress_message, rendered)
+                        await send_plain_draft(
+                            update,
+                            context,
+                            rendered,
+                            draft_id=draft_id,
+                            parse_mode=ParseMode.HTML,
+                        )
                     else:
-                        await edit_message_plain(progress_message, rendered)
+                        await send_plain_draft(
+                            update, context, rendered, draft_id=draft_id
+                        )
                     last_rendered = rendered
             else:
                 rendered = progress_text(
@@ -1282,13 +1329,13 @@ def build_application(token: str, db: Database, service: BotService):
                     max_tokens=max_tokens,
                     received_chars=received_chars,
                 )
-                if rendered != last_rendered:
+                if stream_queue is None and rendered != last_rendered:
                     await edit_message_html(progress_message, rendered)
                     last_rendered = rendered
             last_update = now
         if stream_visible_text and streamed_parts:
             if stream_mode == "code_tail":
-                rendered = code_tail_progress_text(
+                rendered = code_tail_draft_text(
                     update,
                     title_key,
                     detail_key,
@@ -1302,17 +1349,16 @@ def build_application(token: str, db: Database, service: BotService):
                     max_tokens=max_tokens,
                 )
             if rendered != last_rendered:
-                if draft_ok and stream_mode != "code_tail":
-                    draft_ok = await send_plain_draft(
-                        update, context, title_key, rendered
-                    )
-                    stream_used_draft = stream_used_draft or draft_ok
                 if stream_mode == "code_tail":
-                    await edit_message_html(progress_message, rendered)
+                    await send_plain_draft(
+                        update,
+                        context,
+                        rendered,
+                        draft_id=draft_id,
+                        parse_mode=ParseMode.HTML,
+                    )
                 else:
-                    await edit_message_plain(progress_message, rendered)
-        if stream_used_draft:
-            context.user_data["_botmother_stream_used_draft"] = True
+                    await send_plain_draft(update, context, rendered, draft_id=draft_id)
         return await task
 
     def make_stream_queue() -> tuple[asyncio.Queue[str], Any]:
@@ -1837,12 +1883,9 @@ def build_application(token: str, db: Database, service: BotService):
             result.ok,
             result.bot_id,
         )
-        result_markup = (
-            bot_actions_keyboard(result.bot_id, locale_for_update(update))
-            if result.bot_id
-            else None
-        )
-        await edit_message_result(
+        await finalize_streamed_result(
+            update,
+            context,
             progress_message,
             append_ai_usage(
                 result.message,
@@ -1852,7 +1895,6 @@ def build_application(token: str, db: Database, service: BotService):
                 ),
                 locale_for_update(update),
             ),
-            reply_markup=result_markup,
         )
         context.user_data.clear()
         return ConversationHandler.END
@@ -2027,7 +2069,6 @@ def build_application(token: str, db: Database, service: BotService):
             0,
             max_tokens=service.settings.openrouter_interaction_max_tokens,
         )
-        draft_ok = True
         progress_message = await reply_html(update.effective_message, initial_progress)
 
         loop = asyncio.get_running_loop()
@@ -2051,7 +2092,8 @@ def build_application(token: str, db: Database, service: BotService):
         last_preview = ""
         started = loop.time()
         last_update = 0.0
-        stream_used_draft = False
+        draft_interval = 0.5
+        draft_id = new_stream_draft_id(context)
         while not result_task.done() or not stream_queue.empty():
             try:
                 delta = await asyncio.wait_for(stream_queue.get(), timeout=1.0)
@@ -2062,23 +2104,10 @@ def build_application(token: str, db: Database, service: BotService):
 
             preview = "".join(streamed_parts).strip()
             now = loop.time()
-            elapsed = int(now - started)
             if not preview:
-                if now - last_update >= 6:
-                    await edit_message_html(
-                        progress_message,
-                        progress_text(
-                            update,
-                            tr(update, title_key),
-                            tr(update, detail_key),
-                            elapsed,
-                            max_tokens=service.settings.openrouter_interaction_max_tokens,
-                        ),
-                    )
-                    last_update = now
                 continue
             if preview == last_preview or (
-                last_preview and now - last_update < 0.7 and len(delta) < 80
+                last_preview and now - last_update < draft_interval
             ):
                 continue
             last_preview = preview
@@ -2088,12 +2117,7 @@ def build_application(token: str, db: Database, service: BotService):
                 preview,
                 max_tokens=service.settings.openrouter_interaction_max_tokens,
             )
-            if draft_ok:
-                draft_ok = await send_plain_draft(
-                    update, context, title_key, streamed_text
-                )
-                stream_used_draft = stream_used_draft or draft_ok
-            await edit_message_plain(progress_message, streamed_text)
+            await send_plain_draft(update, context, streamed_text, draft_id=draft_id)
 
         final_preview = "".join(streamed_parts).strip()
         if final_preview and final_preview != last_preview:
@@ -2102,15 +2126,7 @@ def build_application(token: str, db: Database, service: BotService):
                 final_preview,
                 max_tokens=service.settings.openrouter_interaction_max_tokens,
             )
-            if draft_ok:
-                draft_ok = await send_plain_draft(
-                    update, context, title_key, streamed_text
-                )
-                stream_used_draft = stream_used_draft or draft_ok
-            await edit_message_plain(progress_message, streamed_text)
-
-        if stream_used_draft:
-            context.user_data["_botmother_stream_used_draft"] = True
+            await send_plain_draft(update, context, streamed_text, draft_id=draft_id)
         result = await result_task
         logger.info(
             "Ask bot result: user_id=%s bot_id=%s ok=%s", user_id, bot_id, result.ok
@@ -2118,19 +2134,10 @@ def build_application(token: str, db: Database, service: BotService):
         chunks = chunk_text(
             append_ai_usage(result.message, result.ai_usage, locale_for_update(update))
         )
-        context.user_data.pop("_botmother_stream_used_draft", None)
-        final_markup = bot_actions_keyboard(bot_id, locale_for_update(update))
-        first_markup = final_markup if len(chunks) == 1 else None
-        await edit_message_plain(
-            progress_message,
-            chunks[0],
-            reply_markup=first_markup,
-        )
-        for index, chunk in enumerate(chunks[1:], start=1):
-            reply_markup = (
-                final_markup if index == len(chunks) - 1 else None
-            )
-            await update.effective_message.reply_text(chunk, reply_markup=reply_markup)
+        await delete_message_safely(progress_message)
+        await update.effective_message.reply_text(chunks[0])
+        for chunk in chunks[1:]:
+            await update.effective_message.reply_text(chunk)
         context.user_data.pop("ask_bot_id", None)
         return ConversationHandler.END
 

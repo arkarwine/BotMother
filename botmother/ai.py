@@ -102,14 +102,16 @@ JSON object:
 Rules:
 - Do not use Markdown fences.
 - Do not put prose before the JSON object.
+- Keep the JSON compact. Do not pretty-print it. Reach the delimiter quickly.
 - The delimiter line is mandatory.
 - The text after {HYBRID_RESPONSE_DELIMITER} is the only text the user sees while streaming.
+- Put the complete user-facing message after the delimiter. For questions, include the actual numbered questions and useful choices there too, not only an intro.
 - Ask every material question needed when behavior, storage, commands, admin policy, schedules, external services, env vars, products, payments, operators, or workflows are required and unclear.
 - Use the Requester context BotMother locale for every user-facing question and for the response text after the delimiter. If BotMother locale is "my", write Myanmar/Burmese. If it is "en", write English.
 - Ask as many questions as are necessary in this turn. There is no fixed question limit.
 - Prefer useful answer choices in "suggestions" whenever the user can choose between common options. Do not limit the number of choices if more are genuinely useful.
 - Write questions for a layperson. Avoid technical jargon where possible. If a technical term is necessary, explain what it means, why it is required, and how the user can obtain it.
-- For type "questions", "questions" is mandatory and must contain the exact concrete user-facing question(s). The response text after the delimiter may be a short friendly intro; BotMother will render the numbered questions and choices from JSON.
+- For type "questions", "questions" is mandatory and must contain the exact concrete user-facing question(s). The response text after the delimiter must include the same questions in a clean numbered layout with choices where useful.
 - For code: return a full, comprehensive English implementation prompt in "code", not Python source. Include the product goal, target users, target child-bot UI language, admin policy, workflows, data to persist, required buttons/menus, env var names, runtime contract, edge cases, inferred defaults, and acceptance criteria.
 - Make the implementation prompt complete enough for the coding model to build without reading the raw chat.
 - Include env only for explicit user-provided non-runtime values. Do not invent secrets.
@@ -148,8 +150,10 @@ JSON object:
 Rules:
 - Do not use Markdown fences.
 - Do not put prose before the JSON object.
+- Keep the JSON compact. Do not pretty-print it. Reach the delimiter quickly.
 - The delimiter line is mandatory.
 - The text after {HYBRID_RESPONSE_DELIMITER} is the only text the user sees while streaming.
+- Put the complete user-facing message after the delimiter. For questions, include the actual numbered questions and useful choices there too, not only an intro.
 - Use the Requester context BotMother locale for every user-facing question and for the response text after the delimiter. If BotMother locale is "my", write Myanmar/Burmese. If it is "en", write English.
 - Check only missing essentials required for the requested bot to run usefully: required auth/config, admins/operators, payment/contact info, or core workflow data.
 - Do not ask optional preference/polish questions.
@@ -158,7 +162,7 @@ Rules:
 - Use "ready" if no necessary build/run data is missing from the prompt; otherwise ask every necessary missing question. There is no fixed question limit.
 - Prefer useful answer choices in "suggestions" whenever the user can choose between common options. Do not limit the number of choices if more are genuinely useful.
 - Write questions for a layperson. Avoid technical jargon where possible. If a technical term is necessary, explain what it means, why it is required, and how the user can obtain it.
-- For type "questions", "questions" is mandatory and must contain the exact concrete user-facing question(s). The response text after the delimiter may be a short friendly intro; BotMother will render the numbered questions and choices from JSON.
+- For type "questions", "questions" is mandatory and must contain the exact concrete user-facing question(s). The response text after the delimiter must include the same questions in a clean numbered layout with choices where useful.
 """
 
 
