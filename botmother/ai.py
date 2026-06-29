@@ -173,6 +173,51 @@ class AIResponseError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class AIUsage:
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+
+    @property
+    def has_counts(self) -> bool:
+        return any(
+            value is not None
+            for value in (
+                self.prompt_tokens,
+                self.completion_tokens,
+                self.total_tokens,
+            )
+        )
+
+
+@dataclass(frozen=True)
+class AITextResult:
+    text: str
+    usage: AIUsage | None = None
+    finish_reason: str | None = None
+    native_finish_reason: str | None = None
+    response_id: str | None = None
+    requested_model: str | None = None
+    returned_model: str | None = None
+
+    @property
+    def finished_by_token_limit(self) -> bool:
+        reasons = {self.finish_reason, self.native_finish_reason}
+        return any(
+            isinstance(reason, str)
+            and reason.strip().lower()
+            in {
+                "length",
+                "max_tokens",
+                "max_completion_tokens",
+                "token_limit",
+                "model_length",
+            }
+            for reason in reasons
+        )
+
+
+@dataclass(frozen=True)
 class AIQuestion:
     id: str
     question: str
@@ -483,6 +528,22 @@ def _text_len(value: Any) -> int:
     return 0
 
 
+def _int_or_none(value: Any) -> int | None:
+    return value if isinstance(value, int) else None
+
+
+def _usage_from_response(data: dict[str, Any]) -> AIUsage | None:
+    usage = data.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    parsed = AIUsage(
+        prompt_tokens=_int_or_none(usage.get("prompt_tokens")),
+        completion_tokens=_int_or_none(usage.get("completion_tokens")),
+        total_tokens=_int_or_none(usage.get("total_tokens")),
+    )
+    return parsed if parsed.has_counts else None
+
+
 def _empty_response_diagnostics(
     data: dict[str, Any], choice: dict[str, Any], message: dict[str, Any], model: str
 ) -> dict[str, Any]:
@@ -567,6 +628,29 @@ class OpenRouterCodeGenerator:
         json_mode: bool = False,
         model: str | None = None,
     ) -> str:
+        return self._chat_result(
+            system_prompt,
+            user_prompt,
+            json_mode=json_mode,
+            model=model,
+        ).text
+
+    def _chat_result(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        json_mode: bool = False,
+        model: str | None = None,
+    ) -> AITextResult:
+        if type(self)._chat is not OpenRouterCodeGenerator._chat:
+            return AITextResult(
+                self._chat(
+                    system_prompt,
+                    user_prompt,
+                    json_mode=json_mode,
+                    model=model,
+                )
+            )
         resolved_model = model or self.model
         payload: dict[str, Any] = {
             "model": resolved_model,
@@ -641,7 +725,25 @@ class OpenRouterCodeGenerator:
                 "OpenRouter returned no visible assistant content: %s",
                 _json_preview(diagnostics),
             )
-            return ""
+            return AITextResult(
+                "",
+                usage=_usage_from_response(data),
+                finish_reason=(
+                    str(choice.get("finish_reason"))
+                    if choice.get("finish_reason") is not None
+                    else None
+                ),
+                native_finish_reason=(
+                    str(choice.get("native_finish_reason"))
+                    if choice.get("native_finish_reason") is not None
+                    else None
+                ),
+                response_id=str(data.get("id")) if data.get("id") is not None else None,
+                requested_model=resolved_model,
+                returned_model=(
+                    str(data.get("model")) if data.get("model") is not None else None
+                ),
+            )
         logger.debug(
             "OpenRouter response: id=%s requested_model=%s returned_model=%s finish_reason=%s content_chars=%s usage=%s",
             data.get("id"),
@@ -651,7 +753,25 @@ class OpenRouterCodeGenerator:
             len(content),
             data.get("usage"),
         )
-        return content
+        return AITextResult(
+            content,
+            usage=_usage_from_response(data),
+            finish_reason=(
+                str(choice.get("finish_reason"))
+                if choice.get("finish_reason") is not None
+                else None
+            ),
+            native_finish_reason=(
+                str(choice.get("native_finish_reason"))
+                if choice.get("native_finish_reason") is not None
+                else None
+            ),
+            response_id=str(data.get("id")) if data.get("id") is not None else None,
+            requested_model=resolved_model,
+            returned_model=(
+                str(data.get("model")) if data.get("model") is not None else None
+            ),
+        )
 
     def _generate_json_text(self, prompt: str) -> str:
         text = self._chat(
@@ -923,6 +1043,11 @@ class OpenRouterCodeGenerator:
         return self._generate_readiness_decision(prompt)
 
     def generate_code(self, coding_brief: str, user_context: str = "") -> str:
+        return self.generate_code_result(coding_brief, user_context=user_context).text
+
+    def generate_code_result(
+        self, coding_brief: str, user_context: str = ""
+    ) -> AITextResult:
         logger.info(
             "Generating child bot code: model=%s implementation_prompt_chars=%s",
             self.coding_model,
@@ -933,16 +1058,35 @@ class OpenRouterCodeGenerator:
             "Return only Python source.\n\n"
             f"English implementation prompt:\n{coding_brief.strip()}"
         )
-        text = self._chat(SYSTEM_PROMPT, prompt, model=self.coding_model)
-        if text:
-            logger.info("OpenRouter returned generated code: chars=%s", len(text))
-            return text
+        result = self._chat_result(SYSTEM_PROMPT, prompt, model=self.coding_model)
+        if result.finished_by_token_limit:
+            logger.error(
+                "OpenRouter truncated generated code: finish_reason=%s native_finish_reason=%s usage=%s chars=%s",
+                result.finish_reason,
+                result.native_finish_reason,
+                result.usage,
+                len(result.text),
+            )
+            raise AIResponseError(
+                "Code generation stopped because the model hit its token limit. "
+                "No bot was saved. Increase OPENROUTER_CODING_MAX_TOKENS or use a smaller bot brief, then try again."
+            )
+        if result.text:
+            logger.info("OpenRouter returned generated code: chars=%s", len(result.text))
+            return result
         logger.error("OpenRouter returned an empty response")
         raise AIResponseError("OpenRouter returned an empty code response.")
 
     def edit_code(
         self, current_code: str, edit_brief: str, user_context: str = ""
     ) -> str:
+        return self.edit_code_result(
+            current_code, edit_brief, user_context=user_context
+        ).text
+
+    def edit_code_result(
+        self, current_code: str, edit_brief: str, user_context: str = ""
+    ) -> AITextResult:
         logger.info(
             "Editing child bot code: model=%s code_chars=%s implementation_prompt_chars=%s",
             self.coding_model,
@@ -957,14 +1101,31 @@ class OpenRouterCodeGenerator:
             "```\n\n"
             f"English edit implementation prompt:\n{edit_brief.strip()}"
         )
-        text = self._chat(SYSTEM_PROMPT, prompt, model=self.coding_model)
-        if text:
-            logger.info("OpenRouter returned edited code: chars=%s", len(text))
-            return text
+        result = self._chat_result(SYSTEM_PROMPT, prompt, model=self.coding_model)
+        if result.finished_by_token_limit:
+            logger.error(
+                "OpenRouter truncated edited code: finish_reason=%s native_finish_reason=%s usage=%s chars=%s",
+                result.finish_reason,
+                result.native_finish_reason,
+                result.usage,
+                len(result.text),
+            )
+            raise AIResponseError(
+                "Code editing stopped because the model hit its token limit. "
+                "The running bot was left unchanged. Increase OPENROUTER_CODING_MAX_TOKENS or request a smaller edit, then try again."
+            )
+        if result.text:
+            logger.info("OpenRouter returned edited code: chars=%s", len(result.text))
+            return result
         logger.error("OpenRouter returned an empty edit response")
         raise AIResponseError("OpenRouter returned an empty edit response.")
 
     def answer_bot_question(self, bot_context: str, question: str) -> str:
+        return self.answer_bot_question_result(bot_context, question).text
+
+    def answer_bot_question_result(
+        self, bot_context: str, question: str
+    ) -> AITextResult:
         logger.info(
             "Answering bot question: model=%s context_chars=%s question_chars=%s",
             self.interaction_model,
@@ -974,10 +1135,18 @@ class OpenRouterCodeGenerator:
         prompt = (
             f"Bot context:\n{bot_context.strip()}\n\nUser question:\n{question.strip()}"
         )
-        text = self._chat(ASK_SYSTEM_PROMPT, prompt, model=self.interaction_model)
-        if text and text.strip():
-            logger.info("OpenRouter returned bot answer: chars=%s", len(text))
-            return text.strip()
+        result = self._chat_result(ASK_SYSTEM_PROMPT, prompt, model=self.interaction_model)
+        if result.text and result.text.strip():
+            logger.info("OpenRouter returned bot answer: chars=%s", len(result.text))
+            return AITextResult(
+                result.text.strip(),
+                usage=result.usage,
+                finish_reason=result.finish_reason,
+                native_finish_reason=result.native_finish_reason,
+                response_id=result.response_id,
+                requested_model=result.requested_model,
+                returned_model=result.returned_model,
+            )
         logger.error("OpenRouter returned an empty bot answer")
         raise AIResponseError("OpenRouter returned an empty answer.")
 

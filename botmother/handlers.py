@@ -4,10 +4,11 @@ import logging
 import re
 import uuid
 import asyncio
+import zlib
 from html import escape
 from typing import Any
 
-from .ai import MAX_FOLLOWUP_ROUNDS, AIDecision, AIReadinessDecision
+from .ai import MAX_FOLLOWUP_ROUNDS, AIDecision, AIReadinessDecision, AIUsage
 from .credits import ACTION_ASK, ACTION_EDIT, ACTION_LABELS, ACTION_NEW_BOT, ACTION_REVISE
 from .db import Database
 from .localization import normalize_locale, t
@@ -456,6 +457,26 @@ def format_credit_gate(update: Any, gate: Any) -> str:
         cost=str(getattr(gate, "cost", 0)),
         balance=str(getattr(gate, "balance", 0)),
     )
+
+
+def format_ai_usage_plain(usage: AIUsage | None, locale: str = "en") -> str:
+    if usage is None or not usage.has_counts:
+        return ""
+    unknown = "?"
+    return t(
+        "ai.usage_plain",
+        locale=locale,
+        prompt=str(usage.prompt_tokens if usage.prompt_tokens is not None else unknown),
+        completion=str(
+            usage.completion_tokens if usage.completion_tokens is not None else unknown
+        ),
+        total=str(usage.total_tokens if usage.total_tokens is not None else unknown),
+    )
+
+
+def append_ai_usage(text: str, usage: AIUsage | None, locale: str = "en") -> str:
+    usage_text = format_ai_usage_plain(usage, locale=locale)
+    return f"{text}\n\n{usage_text}" if usage_text else text
 
 
 def format_home_title(update: Any, service: BotService, user_id: int) -> str:
@@ -928,7 +949,7 @@ def build_application(token: str, db: Database, service: BotService):
                 )
         await message.reply_text(text, reply_markup=reply_markup)
 
-    async def edit_or_reply_html(update: Update, text: str, reply_markup=None) -> None:
+    async def edit_or_reply_html(update: Update, text: str, reply_markup=None):
         query = update.callback_query
         can_edit_markup = reply_markup is None or isinstance(
             reply_markup, InlineKeyboardMarkup
@@ -939,20 +960,20 @@ def build_application(token: str, db: Database, service: BotService):
             and can_edit_markup
         ):
             try:
-                await query.edit_message_text(
+                result = await query.edit_message_text(
                     text=text,
                     parse_mode=ParseMode.HTML,
                     reply_markup=reply_markup,
                 )
-                return
+                return result if hasattr(result, "edit_text") else update.effective_message
             except Exception as exc:
                 if is_message_not_modified(exc):
-                    return
+                    return update.effective_message
                 logger.debug(
                     "Could not edit callback message; sending a new message",
                     exc_info=True,
                 )
-        await reply_html(update.effective_message, text, reply_markup=reply_markup)
+        return await reply_html(update.effective_message, text, reply_markup=reply_markup)
 
     async def reply_result(message, text: str, reply_markup=None) -> None:
         await reply_html(message, format_result_html(text), reply_markup=reply_markup)
@@ -978,6 +999,107 @@ def build_application(token: str, db: Database, service: BotService):
 
     async def reply_home(message, text: str, locale: str = "en") -> None:
         await reply_html(message, text, reply_markup=main_reply_keyboard(locale))
+
+    def progress_draft_id(update: Update, title_key: str) -> int:
+        message_id = getattr(update.effective_message, "message_id", None) or 1
+        suffix = zlib.crc32(title_key.encode("utf-8")) % 997
+        return max(1, (int(message_id) * 1000) + suffix + 1)
+
+    def progress_tokens_html(update: Update, max_tokens: int | None) -> str:
+        if max_tokens is None:
+            return ""
+        return tr(update, "ai.progress_tokens_waiting", budget=str(max_tokens))
+
+    def progress_text(
+        update: Update,
+        title: str,
+        detail: str,
+        elapsed_seconds: int,
+        max_tokens: int | None = None,
+    ) -> str:
+        return tr(
+            update,
+            "ai.progress",
+            title=escape(title),
+            detail=escape(detail),
+            elapsed=str(elapsed_seconds),
+            tokens=progress_tokens_html(update, max_tokens),
+        )
+
+    async def send_progress_draft(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        title_key: str,
+        detail_key: str,
+        elapsed_seconds: int,
+        max_tokens: int | None = None,
+    ) -> bool:
+        try:
+            await context.bot.send_message_draft(
+                chat_id=_chat_id(update),
+                draft_id=progress_draft_id(update, title_key),
+                text=progress_text(
+                    update,
+                    tr(update, title_key),
+                    tr(update, detail_key),
+                    elapsed_seconds,
+                    max_tokens=max_tokens,
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+            return True
+        except Exception:
+            logger.debug("Telegram message draft progress failed", exc_info=True)
+            return False
+
+    async def run_with_progress(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        progress_message: Any,
+        awaitable: Any,
+        title_key: str,
+        detail_key: str,
+        max_tokens: int | None = None,
+        interval_seconds: float = 6.0,
+    ):
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        task = asyncio.create_task(awaitable)
+        use_drafts = await send_progress_draft(
+            update,
+            context,
+            title_key,
+            detail_key,
+            0,
+            max_tokens=max_tokens,
+        )
+        while not task.done():
+            await asyncio.sleep(interval_seconds)
+            if task.done():
+                break
+            elapsed = int(loop.time() - started)
+            draft_sent = use_drafts and await send_progress_draft(
+                update,
+                context,
+                title_key,
+                detail_key,
+                elapsed,
+                max_tokens=max_tokens,
+            )
+            if draft_sent:
+                continue
+            use_drafts = False
+            await edit_message_html(
+                progress_message,
+                progress_text(
+                    update,
+                    tr(update, title_key),
+                    tr(update, detail_key),
+                    elapsed,
+                    max_tokens=max_tokens,
+                ),
+            )
+        return await task
 
     async def restart_expired_flow(
         update: Update, context: ContextTypes.DEFAULT_TYPE, action: str, title: str
@@ -1225,14 +1347,30 @@ def build_application(token: str, db: Database, service: BotService):
         answers = context.user_data.get("newbot_answers", [])
         force_code = len(answers) >= MAX_FOLLOWUP_ROUNDS
         progress_message = await reply_html(
-            update.effective_message, tr(update, "newbot.thinking")
+            update.effective_message,
+            progress_text(
+                update,
+                tr(update, "ai.progress_newbot_title"),
+                tr(update, "ai.progress_newbot_detail"),
+                0,
+                max_tokens=service.settings.openrouter_interaction_max_tokens,
+            ),
         )
         try:
-            decision = service.plan_new_bot(
-                prompt,
-                answers,
-                force_code=force_code,
-                user_context=str(context.user_data.get("newbot_user_context", "")),
+            decision = await run_with_progress(
+                update,
+                context,
+                progress_message,
+                asyncio.to_thread(
+                    service.plan_new_bot,
+                    prompt,
+                    answers,
+                    force_code=force_code,
+                    user_context=str(context.user_data.get("newbot_user_context", "")),
+                ),
+                "ai.progress_newbot_title",
+                "ai.progress_newbot_detail",
+                max_tokens=service.settings.openrouter_interaction_max_tokens,
             )
         except Exception:
             refund_flow_credits(context, "New Bot planning failed")
@@ -1255,11 +1393,30 @@ def build_application(token: str, db: Database, service: BotService):
             return NEW_FOLLOWUP
 
         try:
-            readiness = service.check_new_bot_readiness(
-                prompt,
-                answers,
-                decision,
-                user_context=str(context.user_data.get("newbot_user_context", "")),
+            await edit_message_html(
+                progress_message,
+                progress_text(
+                    update,
+                    tr(update, "ai.progress_readiness_title"),
+                    tr(update, "ai.progress_readiness_detail"),
+                    0,
+                    max_tokens=service.settings.openrouter_interaction_max_tokens,
+                ),
+            )
+            readiness = await run_with_progress(
+                update,
+                context,
+                progress_message,
+                asyncio.to_thread(
+                    service.check_new_bot_readiness,
+                    prompt,
+                    answers,
+                    decision,
+                    user_context=str(context.user_data.get("newbot_user_context", "")),
+                ),
+                "ai.progress_readiness_title",
+                "ai.progress_readiness_detail",
+                max_tokens=service.settings.openrouter_interaction_max_tokens,
             )
         except Exception:
             refund_flow_credits(context, "New Bot readiness check failed")
@@ -1380,17 +1537,31 @@ def build_application(token: str, db: Database, service: BotService):
             return NEW_TOKEN
         progress_message = await reply_html(
             update.effective_message,
-            tr(update, "newbot.launching"),
+            progress_text(
+                update,
+                tr(update, "ai.progress_codegen_title"),
+                tr(update, "ai.progress_codegen_detail"),
+                0,
+                max_tokens=service.settings.openrouter_coding_max_tokens,
+            ),
         )
         reservation_id = context.user_data.get("newbot_credit_reservation_id")
         try:
-            result = await service.create_bot_from_decision(
-                user_id,
-                _chat_id(update),
-                prompt,
-                token_text,
-                decision,
-                user_context=str(context.user_data.get("newbot_user_context", "")),
+            result = await run_with_progress(
+                update,
+                context,
+                progress_message,
+                service.create_bot_from_decision(
+                    user_id,
+                    _chat_id(update),
+                    prompt,
+                    token_text,
+                    decision,
+                    user_context=str(context.user_data.get("newbot_user_context", "")),
+                ),
+                "ai.progress_codegen_title",
+                "ai.progress_codegen_detail",
+                max_tokens=service.settings.openrouter_coding_max_tokens,
             )
         except Exception:
             service.refund_paid_action(reservation_id, "New Bot creation failed")
@@ -1412,7 +1583,7 @@ def build_application(token: str, db: Database, service: BotService):
         )
         await edit_message_result(
             progress_message,
-            result.message,
+            append_ai_usage(result.message, result.ai_usage, locale_for_update(update)),
             reply_markup=result_markup,
         )
         context.user_data.clear()
@@ -1581,18 +1752,35 @@ def build_application(token: str, db: Database, service: BotService):
     ) -> int:
         progress_message = await reply_html(
             update.effective_message,
-            tr(update, "ask.reading"),
+            progress_text(
+                update,
+                tr(update, "ai.progress_ask_title"),
+                tr(update, "ai.progress_ask_detail"),
+                0,
+                max_tokens=service.settings.openrouter_interaction_max_tokens,
+            ),
         )
-        result = service.ask_bot(
-            user_id,
-            bot_id,
-            question,
-            user_context=str(context.user_data.get("ask_user_context", "")),
+        result = await run_with_progress(
+            update,
+            context,
+            progress_message,
+            asyncio.to_thread(
+                service.ask_bot,
+                user_id,
+                bot_id,
+                question,
+                user_context=str(context.user_data.get("ask_user_context", "")),
+            ),
+            "ai.progress_ask_title",
+            "ai.progress_ask_detail",
+            max_tokens=service.settings.openrouter_interaction_max_tokens,
         )
         logger.info(
             "Ask bot result: user_id=%s bot_id=%s ok=%s", user_id, bot_id, result.ok
         )
-        chunks = chunk_text(result.message)
+        chunks = chunk_text(
+            append_ai_usage(result.message, result.ai_usage, locale_for_update(update))
+        )
         await edit_message_plain(progress_message, chunks[0])
         for index, chunk in enumerate(chunks[1:], start=1):
             reply_markup = (
@@ -2009,13 +2197,30 @@ def build_application(token: str, db: Database, service: BotService):
                 reply_markup=bot_actions_keyboard(bot_id, locale_for_update(update)),
             )
         elif action == "autofix":
-            await edit_or_reply_html(update, tr(update, "autofix.running"))
-            result = await service.auto_fix_bot(
-                user_id, bot_id, user_context=user_context_for_ai(update)
+            progress_message = await edit_or_reply_html(
+                update,
+                progress_text(
+                    update,
+                    tr(update, "ai.progress_autofix_title"),
+                    tr(update, "ai.progress_autofix_detail"),
+                    0,
+                    max_tokens=service.settings.openrouter_coding_max_tokens,
+                ),
+            )
+            result = await run_with_progress(
+                update,
+                context,
+                progress_message,
+                service.auto_fix_bot(
+                    user_id, bot_id, user_context=user_context_for_ai(update)
+                ),
+                "ai.progress_autofix_title",
+                "ai.progress_autofix_detail",
+                max_tokens=service.settings.openrouter_coding_max_tokens,
             )
             await edit_or_reply_result(
                 update,
-                result.message,
+                append_ai_usage(result.message, result.ai_usage, locale_for_update(update)),
                 reply_markup=bot_actions_keyboard(bot_id, locale_for_update(update)),
             )
         elif action == "restart":
@@ -2139,13 +2344,30 @@ def build_application(token: str, db: Database, service: BotService):
         if bot_id is None:
             await choose_bot_for_action(update, "autofix", tr(update, "choose.autofix"))
             return
-        progress_message = await reply_html(update.effective_message, tr(update, "autofix.running"))
-        result = await service.auto_fix_bot(
-            user_id, bot_id, user_context=user_context_for_ai(update)
+        progress_message = await reply_html(
+            update.effective_message,
+            progress_text(
+                update,
+                tr(update, "ai.progress_autofix_title"),
+                tr(update, "ai.progress_autofix_detail"),
+                0,
+                max_tokens=service.settings.openrouter_coding_max_tokens,
+            ),
+        )
+        result = await run_with_progress(
+            update,
+            context,
+            progress_message,
+            service.auto_fix_bot(
+                user_id, bot_id, user_context=user_context_for_ai(update)
+            ),
+            "ai.progress_autofix_title",
+            "ai.progress_autofix_detail",
+            max_tokens=service.settings.openrouter_coding_max_tokens,
         )
         await edit_message_result(
             progress_message,
-            result.message,
+            append_ai_usage(result.message, result.ai_usage, locale_for_update(update)),
             reply_markup=bot_actions_keyboard(bot_id, locale_for_update(update)) if result.bot_id else keyboard_for_user(user_id),
         )
 
@@ -2224,13 +2446,27 @@ def build_application(token: str, db: Database, service: BotService):
         )
         progress_message = await reply_html(
             update.effective_message,
-            tr(update, "revise.running"),
+            progress_text(
+                update,
+                tr(update, "ai.progress_revise_title"),
+                tr(update, "ai.progress_revise_detail"),
+                0,
+                max_tokens=service.settings.openrouter_coding_max_tokens,
+            ),
         )
-        result = await service.revise_bot(
-            user_id,
-            bot_id,
-            prompt,
-            user_context=str(context.user_data.get("revise_user_context", "")),
+        result = await run_with_progress(
+            update,
+            context,
+            progress_message,
+            service.revise_bot(
+                user_id,
+                bot_id,
+                prompt,
+                user_context=str(context.user_data.get("revise_user_context", "")),
+            ),
+            "ai.progress_revise_title",
+            "ai.progress_revise_detail",
+            max_tokens=service.settings.openrouter_coding_max_tokens,
         )
         logger.info(
             "Revise bot result: user_id=%s bot_id=%s ok=%s", user_id, bot_id, result.ok
@@ -2242,7 +2478,7 @@ def build_application(token: str, db: Database, service: BotService):
         )
         await edit_message_result(
             progress_message,
-            result.message,
+            append_ai_usage(result.message, result.ai_usage, locale_for_update(update)),
             reply_markup=result_markup,
         )
         context.user_data.pop("revise_bot_id", None)
@@ -2320,16 +2556,32 @@ def build_application(token: str, db: Database, service: BotService):
         answers = context.user_data.get("edit_answers", [])
         force_code = len(answers) >= MAX_FOLLOWUP_ROUNDS
         progress_message = await reply_html(
-            update.effective_message, tr(update, "edit.thinking")
+            update.effective_message,
+            progress_text(
+                update,
+                tr(update, "ai.progress_edit_title"),
+                tr(update, "ai.progress_edit_detail"),
+                0,
+                max_tokens=service.settings.openrouter_interaction_max_tokens,
+            ),
         )
         try:
-            decision = service.plan_edit_bot(
-                user_id,
-                bot_id,
-                prompt,
-                answers,
-                force_code=force_code,
-                user_context=str(context.user_data.get("edit_user_context", "")),
+            decision = await run_with_progress(
+                update,
+                context,
+                progress_message,
+                asyncio.to_thread(
+                    service.plan_edit_bot,
+                    user_id,
+                    bot_id,
+                    prompt,
+                    answers,
+                    force_code=force_code,
+                    user_context=str(context.user_data.get("edit_user_context", "")),
+                ),
+                "ai.progress_edit_title",
+                "ai.progress_edit_detail",
+                max_tokens=service.settings.openrouter_interaction_max_tokens,
             )
         except Exception:
             refund_flow_credits(context, "Edit planning failed")
@@ -2358,16 +2610,30 @@ def build_application(token: str, db: Database, service: BotService):
 
         await edit_message_html(
             progress_message,
-            tr(update, "edit.applying"),
+            progress_text(
+                update,
+                tr(update, "ai.progress_edit_apply_title"),
+                tr(update, "ai.progress_edit_apply_detail"),
+                0,
+                max_tokens=service.settings.openrouter_coding_max_tokens,
+            ),
         )
         reservation_id = context.user_data.get("edit_credit_reservation_id")
         try:
-            result = await service.edit_bot_from_decision(
-                user_id,
-                bot_id,
-                prompt,
-                decision,
-                user_context=str(context.user_data.get("edit_user_context", "")),
+            result = await run_with_progress(
+                update,
+                context,
+                progress_message,
+                service.edit_bot_from_decision(
+                    user_id,
+                    bot_id,
+                    prompt,
+                    decision,
+                    user_context=str(context.user_data.get("edit_user_context", "")),
+                ),
+                "ai.progress_edit_apply_title",
+                "ai.progress_edit_apply_detail",
+                max_tokens=service.settings.openrouter_coding_max_tokens,
             )
         except Exception:
             service.refund_paid_action(reservation_id, "Edit failed")
@@ -2386,7 +2652,7 @@ def build_application(token: str, db: Database, service: BotService):
         )
         await edit_message_result(
             progress_message,
-            result.message,
+            append_ai_usage(result.message, result.ai_usage, locale_for_update(update)),
             reply_markup=result_markup,
         )
         context.user_data.clear()

@@ -116,6 +116,36 @@ class AIDecisionTests(unittest.TestCase):
 
         self.assertEqual(text, "hello\nworld")
 
+    def test_generate_code_result_exposes_openrouter_usage(self):
+        generator = OpenRouterCodeGenerator(api_key="sk-test", model="test-model")
+        body = (
+            b'{"id":"abc","model":"test-model","usage":{"prompt_tokens":11,'
+            b'"completion_tokens":22,"total_tokens":33},"choices":[{"finish_reason":"stop",'
+            b'"message":{"content":"print(1)"}}]}'
+        )
+
+        with patch("urllib.request.urlopen", return_value=FakeHTTPResponseWithBody(body)):
+            result = generator.generate_code_result("make an echo bot")
+
+        self.assertEqual(result.text, "print(1)")
+        self.assertIsNotNone(result.usage)
+        self.assertEqual(result.usage.prompt_tokens, 11)
+        self.assertEqual(result.usage.completion_tokens, 22)
+        self.assertEqual(result.usage.total_tokens, 33)
+
+    def test_generate_code_rejects_token_limited_partial_output(self):
+        generator = OpenRouterCodeGenerator(api_key="sk-test", model="test-model")
+        body = (
+            b'{"usage":{"prompt_tokens":11,"completion_tokens":24000,"total_tokens":24011},'
+            b'"choices":[{"finish_reason":"length","message":{"content":"def main("}}]}'
+        )
+
+        with patch("urllib.request.urlopen", return_value=FakeHTTPResponseWithBody(body)):
+            with self.assertRaises(AIResponseError) as caught:
+                generator.generate_code_result("make a huge bot")
+
+        self.assertIn("token limit", str(caught.exception))
+
     def test_empty_json_response_falls_back_instead_of_crashing(self):
         generator = make_generator(["", "", ""])
 

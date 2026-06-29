@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 from .ai import (
+    AIResponseError,
     AIDecision,
     AIQuestion,
     AIReadinessDecision,
+    AITextResult,
+    AIUsage,
     OpenRouterCodeGenerator,
 )
 from .code_tools import (
@@ -36,6 +40,7 @@ class OperationResult:
     ok: bool
     message: str
     bot_id: int | None = None
+    ai_usage: AIUsage | None = None
 
 
 @dataclass(frozen=True)
@@ -51,6 +56,7 @@ class AskResult:
     ok: bool
     message: str
     bot_id: int | None = None
+    ai_usage: AIUsage | None = None
 
 
 @dataclass(frozen=True)
@@ -260,15 +266,22 @@ class BotService:
         token: str,
         user_context: str = "",
     ) -> OperationResult:
-        coding_brief = self.generator.build_coding_brief(prompt, user_context=user_context)
-        raw = self.generator.generate_code(coding_brief)
+        try:
+            coding_brief = await asyncio.to_thread(
+                self.generator.build_coding_brief, prompt, user_context=user_context
+            )
+            generated = await asyncio.to_thread(self._generate_code_result, coding_brief)
+        except AIResponseError as exc:
+            logger.warning("Create generation failed before save: %s", exc)
+            return OperationResult(False, f"⚠️ Code generation stopped\n\n{exc}")
         return await self.create_bot_from_code(
             user_id,
             chat_id,
             prompt,
             token,
-            raw,
+            generated.text,
             user_context=user_context,
+            ai_usage=generated.usage,
         )
 
     async def create_bot_from_decision(
@@ -283,15 +296,20 @@ class BotService:
         if decision.type != "code" or not decision.code:
             return OperationResult(False, "AI did not provide code yet.")
         coding_brief = decision.code
-        raw_code = self.generator.generate_code(coding_brief)
+        try:
+            generated = await asyncio.to_thread(self._generate_code_result, coding_brief)
+        except AIResponseError as exc:
+            logger.warning("Create generation failed before save: %s", exc)
+            return OperationResult(False, f"⚠️ Code generation stopped\n\n{exc}")
         return await self.create_bot_from_code(
             user_id,
             chat_id,
             prompt,
             token,
-            raw_code,
+            generated.text,
             self._env_dict(decision),
             user_context=user_context,
+            ai_usage=generated.usage,
         )
 
     async def create_bot_from_code(
@@ -303,6 +321,7 @@ class BotService:
         raw_code: str,
         env_vars: dict[str, str] | None = None,
         user_context: str = "",
+        ai_usage: AIUsage | None = None,
     ) -> OperationResult:
         token = token.strip()
         if not is_valid_telegram_token(token):
@@ -358,7 +377,7 @@ class BotService:
                 validation.error,
             )
             return OperationResult(
-                False, f"Generated code was rejected: {validation.error}"
+                False, f"Generated code was rejected: {validation.error}", ai_usage=ai_usage
             )
 
         bot_username = await fetch_bot_username(token)
@@ -398,6 +417,7 @@ class BotService:
                 False,
                 f"⚠️ Launch failed\n\n{name} was generated, but it could not start.\n\nError: {exc}\n\nOpen Logs for details.",
                 bot_id,
+                ai_usage,
             )
 
         logger.info("Bot running: bot_id=%s user_id=%s", bot_id, user_id)
@@ -415,6 +435,7 @@ class BotService:
                 "Use the action buttons below to inspect, ask, edit, or manage it."
             ),
             bot_id,
+            ai_usage,
         )
 
     async def revise_bot(
@@ -471,6 +492,7 @@ class BotService:
                 False,
                 f"⚠️ Revision saved, launch failed\n\n{name} was revised, but it could not start.\n\nError: {exc}\n\nOpen Logs for details.",
                 bot_id,
+                result.ai_usage,
             )
 
         logger.info("Bot revised and running: bot_id=%s user_id=%s", bot_id, user_id)
@@ -481,6 +503,7 @@ class BotService:
             True,
             f"✅ {name} revised and running\n\nUse the keyboard to view logs, status, or ask what changed.",
             bot_id,
+            result.ai_usage,
         )
 
     async def edit_bot_with_prompt(
@@ -513,10 +536,18 @@ class BotService:
         env_vars = self._env_dict(decision)
         latest_revision = self.db.latest_revision(bot_id)
         current_code = str(latest_revision["code"]) if latest_revision is not None else ""
-        generated_code = self.generator.edit_code(
-            current_code,
-            decision.code,
-        )
+        try:
+            generated = await asyncio.to_thread(
+                self._edit_code_result, current_code, decision.code
+            )
+        except AIResponseError as exc:
+            logger.warning("Prompt edit generation failed: bot_id=%s error=%s", bot_id, exc)
+            return OperationResult(
+                False,
+                f"⚠️ Edit stopped\n\n{exc}",
+                bot_id,
+            )
+        generated_code = generated.text
         code = extract_python_code(generated_code)
         validation = validate_generated_code(code)
         if not validation.ok:
@@ -532,6 +563,7 @@ class BotService:
                 False,
                 f"⚠️ Edit rejected\n\n{validation.error}\n\nThe running bot was left unchanged.",
                 bot_id,
+                generated.usage,
             )
 
         was_running = bot_id in self.runner.active
@@ -571,6 +603,7 @@ class BotService:
                 False,
                 f"⚠️ Edit saved, launch failed\n\n{name} was edited, but it could not start.\n\nError: {exc}\n\nOpen Logs for details.",
                 bot_id,
+                generated.usage,
             )
 
         bot = self.db.get_bot(bot_id)
@@ -579,6 +612,7 @@ class BotService:
             True,
             f"✅ {name} edited and running\n\nUse the keyboard to view logs, status, or ask what changed.",
             bot_id,
+            generated.usage,
         )
 
     async def stop_bot(self, user_id: int, bot_id: int) -> OperationResult:
@@ -766,7 +800,8 @@ class BotService:
                     f"{user_context.strip()}\n\n"
                     + context
                 )
-            answer = self.generator.answer_bot_question(context, question)
+            answered = self._answer_bot_question_result(context, question)
+            answer = answered.text
             answer = self._redact_context(
                 answer, str(bot["token"]), self.db.get_bot_env_vars(bot_id)
             )
@@ -775,7 +810,7 @@ class BotService:
             logger.exception("Ask failed: bot_id=%s user_id=%s", bot_id, user_id)
             return AskResult(False, f"Could not answer about this bot: {exc}", bot_id)
         self.settle_paid_action(reservation_id, bot_id=bot_id, note="Ask answered")
-        return AskResult(True, answer, bot_id)
+        return AskResult(True, answer, bot_id, answered.usage)
 
     async def auto_fix_bot(
         self, user_id: int, bot_id: int, user_context: str = ""
@@ -796,7 +831,8 @@ class BotService:
         prompt = self._auto_fix_prompt(bot_id, bot, revision)
         logger.info("Auto-fix planning: bot_id=%s user_id=%s prompt_chars=%s", bot_id, user_id, len(prompt))
         try:
-            decision = self.generator.decide_edit(
+            decision = await asyncio.to_thread(
+                self.generator.decide_edit,
                 revision["code"],
                 prompt,
                 [],
@@ -887,6 +923,26 @@ class BotService:
     def _env_dict(self, decision: AIDecision) -> dict[str, str]:
         return {item.name: item.value for item in decision.env}
 
+    def _generate_code_result(self, coding_brief: str) -> AITextResult:
+        generate_result = getattr(self.generator, "generate_code_result", None)
+        if callable(generate_result):
+            return generate_result(coding_brief)
+        return AITextResult(self.generator.generate_code(coding_brief))
+
+    def _edit_code_result(self, current_code: str, edit_brief: str) -> AITextResult:
+        edit_result = getattr(self.generator, "edit_code_result", None)
+        if callable(edit_result):
+            return edit_result(current_code, edit_brief)
+        return AITextResult(self.generator.edit_code(current_code, edit_brief))
+
+    def _answer_bot_question_result(
+        self, bot_context: str, question: str
+    ) -> AITextResult:
+        answer_result = getattr(self.generator, "answer_bot_question_result", None)
+        if callable(answer_result):
+            return answer_result(bot_context, question)
+        return AITextResult(self.generator.answer_bot_question(bot_context, question))
+
     def _bot_question_context(self, bot_id: int, bot, revision) -> str:
         env_names = sorted(self.db.get_bot_env_vars(bot_id))
         logs = self.db.get_logs(bot_id, 40)
@@ -971,8 +1027,16 @@ class BotService:
         logger.info(
             "Generating revision: bot_id=%s prompt_chars=%s", bot_id, len(prompt)
         )
-        coding_brief = self.generator.build_coding_brief(prompt, user_context=user_context)
-        raw = self.generator.generate_code(coding_brief)
+        try:
+            coding_brief = await asyncio.to_thread(
+                self.generator.build_coding_brief, prompt, user_context=user_context
+            )
+            generated = await asyncio.to_thread(self._generate_code_result, coding_brief)
+        except AIResponseError as exc:
+            logger.warning("Revision generation failed: bot_id=%s error=%s", bot_id, exc)
+            self.db.update_bot_status(bot_id, "invalid")
+            return OperationResult(False, f"Generated code was rejected: {exc}", bot_id)
+        raw = generated.text
         code = extract_python_code(raw)
         validation = validate_generated_code(code)
         if not validation.ok:
@@ -984,7 +1048,7 @@ class BotService:
             self.db.add_revision(bot_id, prompt, code, "failed", validation.error)
             self.db.update_bot_status(bot_id, "invalid")
             return OperationResult(
-                False, f"Generated code was rejected: {validation.error}", bot_id
+                False, f"Generated code was rejected: {validation.error}", bot_id, generated.usage
             )
 
         self.db.add_revision(bot_id, prompt, code, "ok", None)
@@ -992,4 +1056,4 @@ class BotService:
         logger.info(
             "Generated code validated: bot_id=%s code_chars=%s", bot_id, len(code)
         )
-        return OperationResult(True, "Generated valid code.", bot_id)
+        return OperationResult(True, "Generated valid code.", bot_id, generated.usage)
