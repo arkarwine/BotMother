@@ -10,8 +10,6 @@ from botmother.runner import (
     MAX_UNEXPECTED_SIGNAL_RESTARTS,
     ProcessManager,
     ProcessRecord,
-    RunnerError,
-    bubblewrap_failure_hint,
     format_return_code,
     is_signal_exit,
 )
@@ -31,8 +29,6 @@ def make_settings(tmp: str) -> Settings:
         workdir=Path(tmp) / "bots",
         owner_ids={1},
         python_bin="/usr/bin/python3",
-        bwrap_bin="bwrap",
-        require_bwrap=True,
     )
 
 
@@ -152,126 +148,53 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(db.get_bot(bot_id)["status"], "interrupted")
             self.assertEqual(restarted, [(bot_id, "-2 (SIGINT)")])
 
-    def test_sandbox_command_does_not_include_token(self):
+    def test_plain_command_does_not_include_token(self):
         with tempfile.TemporaryDirectory() as tmp:
             settings = make_settings(tmp)
             db = Database(settings.db_path)
             manager = ProcessManager(settings, db)
-            bot_dir = Path(tmp) / "bots" / "1"
-            cmd = manager.build_sandbox_command(bot_dir)
+            cmd = manager.build_plain_command()
             joined = " ".join(cmd)
 
-            self.assertIn("bwrap", cmd[0])
-            self.assertIn("--bind", cmd)
-            self.assertIn("/app", cmd)
+            self.assertEqual(cmd, [settings.python_bin, "bot.py"])
             self.assertIn("bot.py", cmd)
             self.assertNotIn("BOT_TOKEN", joined)
             self.assertNotIn("mother_token", joined)
 
-    def test_bwrap_preflight_command_does_not_request_uid_mapping(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = make_settings(tmp)
-            db = Database(settings.db_path)
-            manager = ProcessManager(settings, db)
-            cmd = manager.build_bwrap_preflight_command()
-
-            self.assertIn("bwrap", cmd[0])
-            self.assertNotIn("--uid", cmd)
-            self.assertNotIn("--gid", cmd)
-            self.assertNotIn("--unshare-user", cmd)
-
-    def test_bwrap_uid_map_error_has_ubuntu_fix_hint(self):
-        hint = bubblewrap_failure_hint(
-            "bwrap: setting up uid map: Permission denied"
-        )
-
-        self.assertIn("kernel.unprivileged_userns_clone=1", hint)
-        self.assertIn("BOTMOTHER_REQUIRE_BWRAP=false", hint)
-
-    def test_bwrap_preflight_failure_can_fallback_to_plain_launch(self):
+    def test_start_bot_launches_plain_python_in_bot_directory(self):
         async def run_case():
             with tempfile.TemporaryDirectory() as tmp:
                 settings = make_settings(tmp)
-                settings = Settings(
-                    mother_bot_token=settings.mother_bot_token,
-                    openrouter_api_key=settings.openrouter_api_key,
-                    openrouter_model=settings.openrouter_model,
-                    openrouter_interaction_model=settings.openrouter_interaction_model,
-                    openrouter_coding_model=settings.openrouter_coding_model,
-                    openrouter_base_url=settings.openrouter_base_url,
-                    openrouter_app_name=settings.openrouter_app_name,
-                    openrouter_app_url=settings.openrouter_app_url,
-                    db_path=settings.db_path,
-                    workdir=settings.workdir,
-                    owner_ids=settings.owner_ids,
-                    python_bin=settings.python_bin,
-                    bwrap_bin=settings.bwrap_bin,
-                    require_bwrap=True,
-                    bwrap_fallback_plain=True,
-                )
                 db = Database(settings.db_path)
                 db.initialize()
                 db.upsert_user(1, "owner", None, None)
+                bot_dir = settings.workdir / "1"
                 bot_id = db.create_bot(
                     1,
                     100,
                     "Echo",
                     "make echo",
                     "12345:abcdefghijklmnopqrstuvwxyzABCDE",
-                    settings.workdir / "1",
+                    bot_dir,
                 )
                 db.add_revision(bot_id, "make echo", "print('ok')", "ok", None)
                 manager = ProcessManager(settings, db)
 
-                async def fail_preflight():
-                    raise RunnerError("bwrap: setting up uid map: Permission denied")
-
-                manager._ensure_bwrap_usable = fail_preflight
                 manager._host_python_exists = lambda python_bin: True
-                with patch("botmother.runner.shutil.which", return_value="/usr/bin/bwrap"):
-                    with patch(
-                        "asyncio.create_subprocess_exec",
-                        return_value=FakeLaunchProcess(),
-                    ) as mocked:
-                        await manager.start_bot(bot_id)
+                with patch(
+                    "asyncio.create_subprocess_exec",
+                    return_value=FakeLaunchProcess(),
+                ) as mocked:
+                    await manager.start_bot(bot_id)
 
                 self.assertEqual(mocked.call_args.args[:2], (settings.python_bin, "bot.py"))
-                self.assertTrue(
-                    any("Sandbox disabled" in row["line"] for row in db.get_logs(bot_id, 20))
+                self.assertEqual(mocked.call_args.kwargs["cwd"], str(bot_dir))
+                self.assertEqual(
+                    mocked.call_args.kwargs["env"]["BOT_DB_PATH"],
+                    str(bot_dir / "bot.sqlite3"),
                 )
 
         asyncio.run(run_case())
-
-    def test_sandbox_binds_configured_venv_root_before_resolving_symlink(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            venv = Path(tmp) / ".venv"
-            python_bin = venv / "bin" / "python3"
-            python_bin.parent.mkdir(parents=True)
-            python_bin.write_text("", encoding="utf-8")
-            (venv / "pyvenv.cfg").write_text("", encoding="utf-8")
-            settings = make_settings(tmp)
-            settings = Settings(
-                mother_bot_token=settings.mother_bot_token,
-                openrouter_api_key=settings.openrouter_api_key,
-                openrouter_model=settings.openrouter_model,
-                openrouter_interaction_model=settings.openrouter_interaction_model,
-                openrouter_coding_model=settings.openrouter_coding_model,
-                openrouter_base_url=settings.openrouter_base_url,
-                openrouter_app_name=settings.openrouter_app_name,
-                openrouter_app_url=settings.openrouter_app_url,
-                db_path=settings.db_path,
-                workdir=settings.workdir,
-                owner_ids=settings.owner_ids,
-                python_bin=str(python_bin),
-                bwrap_bin=settings.bwrap_bin,
-                require_bwrap=settings.require_bwrap,
-            )
-            db = Database(settings.db_path)
-            manager = ProcessManager(settings, db)
-            cmd = manager.build_sandbox_command(Path(tmp) / "bots" / "1")
-
-            self.assertIn("--ro-bind", cmd)
-            self.assertIn(str(venv), cmd)
 
     def test_child_env_contains_runtime_contract(self):
         with tempfile.TemporaryDirectory() as tmp:

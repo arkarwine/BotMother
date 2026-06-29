@@ -20,12 +20,11 @@ def main() -> None:
     settings.validate_for_runtime()
     settings.workdir.mkdir(parents=True, exist_ok=True)
     logger.info(
-        "Starting BotMother: db=%s workdir=%s interaction_model=%s coding_model=%s require_bwrap=%s log_file=%s",
+        "Starting BotMother: db=%s workdir=%s interaction_model=%s coding_model=%s log_file=%s",
         settings.db_path,
         settings.workdir,
         settings.openrouter_interaction_model,
         settings.openrouter_coding_model,
-        settings.require_bwrap,
         log_file,
     )
 

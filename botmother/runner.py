@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 MAX_UNEXPECTED_SIGNAL_RESTARTS = 2
 UNEXPECTED_SIGNAL_RESTART_DELAY_SECONDS = 2
 SIGNAL_EXIT_STATUS_GRACE_SECONDS = 1.0
-BWRAP_PREFLIGHT_TIMEOUT_SECONDS = 5.0
 
 
 class RunnerError(RuntimeError):
@@ -30,10 +29,6 @@ class ProcessRecord:
     process: asyncio.subprocess.Process
     tasks: list[asyncio.Task[Any]] = field(default_factory=list)
     desired_stop: bool = False
-
-
-def _existing_paths(paths: list[str]) -> list[Path]:
-    return [Path(p) for p in paths if Path(p).exists()]
 
 
 def format_return_code(return_code: int | None) -> str:
@@ -53,24 +48,6 @@ def is_signal_exit(return_code: int | None) -> bool:
     return return_code is not None and return_code < 0
 
 
-def bubblewrap_failure_hint(stderr: str) -> str:
-    detail = stderr.strip() or "Bubblewrap exited without stderr."
-    lower = detail.lower()
-    if "uid map" in lower or "user namespace" in lower:
-        return (
-            "Bubblewrap sandbox is unavailable because the host denied user-namespace "
-            "uid-map setup.\n\n"
-            f"Bubblewrap error:\n{detail}\n\n"
-            "Ubuntu fix:\n"
-            "sudo sysctl -w kernel.unprivileged_userns_clone=1\n"
-            "printf 'kernel.unprivileged_userns_clone=1\\n' | "
-            "sudo tee /etc/sysctl.d/99-botmother-userns.conf\n\n"
-            "Only for trusted local testing, you can disable sandboxing with "
-            "BOTMOTHER_REQUIRE_BWRAP=false and restart BotMother."
-        )
-    return f"Bubblewrap sandbox preflight failed.\n\nBubblewrap error:\n{detail}"
-
-
 class ProcessManager:
     def __init__(self, settings: Settings, db: Database) -> None:
         self.settings = settings
@@ -78,7 +55,6 @@ class ProcessManager:
         self.active: dict[int, ProcessRecord] = {}
         self.unexpected_signal_restarts: dict[int, int] = {}
         self.shutting_down = False
-        self._bwrap_preflight_ok = False
 
     def _resolve_python_bin(self) -> str:
         configured = self.settings.python_bin
@@ -92,119 +68,8 @@ class ProcessManager:
             return path.exists()
         return shutil.which(python_bin) is not None
 
-    def _find_venv_root(self, path: Path) -> Path | None:
-        current = path if path.is_dir() else path.parent
-        while current != current.parent:
-            if (current / "pyvenv.cfg").exists():
-                return current
-            current = current.parent
-        return None
-
-    def _python_bind_roots(self, python_bin: str) -> list[Path]:
-        path = Path(python_bin)
-        if not path.is_absolute():
-            return []
-
-        roots: list[Path] = []
-        configured_venv = self._find_venv_root(path)
-        if configured_venv is not None:
-            roots.append(configured_venv)
-
-        resolved = path.resolve()
-        resolved_venv = self._find_venv_root(resolved)
-        if resolved_venv is not None and resolved_venv not in roots:
-            roots.append(resolved_venv)
-
-        if roots:
-            return roots
-
-        if str(resolved).startswith("/usr/"):
-            return roots
-        roots.append(resolved.parent)
-        return roots
-
-    def build_sandbox_command(self, bot_dir: Path) -> list[str]:
-        python_bin = self._resolve_python_bin()
-        cmd = [
-            self.settings.bwrap_bin,
-            "--die-with-parent",
-            "--new-session",
-            "--unshare-pid",
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            "--tmpfs",
-            "/tmp",
-        ]
-
-        for path in _existing_paths(["/usr", "/bin", "/lib", "/lib64", "/etc/ssl", "/etc/ca-certificates"]):
-            cmd.extend(["--ro-bind", str(path), str(path)])
-
-        for path in _existing_paths(["/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf"]):
-            cmd.extend(["--ro-bind", str(path), str(path)])
-
-        for root in self._python_bind_roots(python_bin):
-            if root.exists():
-                cmd.extend(["--ro-bind", str(root), str(root)])
-
-        cmd.extend(
-            [
-                "--bind",
-                str(bot_dir),
-                "/app",
-                "--chdir",
-                "/app",
-                python_bin,
-                "bot.py",
-            ]
-        )
-        return cmd
-
     def build_plain_command(self) -> list[str]:
         return [self.settings.python_bin, "bot.py"]
-
-    def build_bwrap_preflight_command(self) -> list[str]:
-        true_path = shutil.which("true") or "/usr/bin/true"
-        cmd = [self.settings.bwrap_bin, "--die-with-parent"]
-        for path in _existing_paths(["/usr", "/bin", "/lib", "/lib64"]):
-            cmd.extend(["--ro-bind", str(path), str(path)])
-        cmd.append(true_path)
-        return cmd
-
-    async def _ensure_bwrap_usable(self) -> None:
-        if self._bwrap_preflight_ok:
-            return
-        command = self.build_bwrap_preflight_command()
-        logger.debug("Running Bubblewrap preflight: command=%s", command)
-        process: asyncio.subprocess.Process | None = None
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=BWRAP_PREFLIGHT_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError as exc:
-            if process is not None and process.returncode is None:
-                process.kill()
-                await process.wait()
-            raise RunnerError(
-                f"Bubblewrap sandbox preflight timed out after {BWRAP_PREFLIGHT_TIMEOUT_SECONDS:.0f}s."
-            ) from exc
-        except OSError as exc:
-            raise RunnerError(f"Bubblewrap sandbox preflight could not start: {exc}") from exc
-
-        if process.returncode != 0:
-            stderr_text = stderr.decode("utf-8", errors="replace")
-            stdout_text = stdout.decode("utf-8", errors="replace").strip()
-            if stdout_text:
-                stderr_text = (stderr_text + "\n" + stdout_text).strip()
-            raise RunnerError(bubblewrap_failure_hint(stderr_text))
-        self._bwrap_preflight_ok = True
 
     def _child_env(self, token: str, bot_db_path: str, extra_env: dict[str, str] | None = None) -> dict[str, str]:
         env = {
@@ -240,69 +105,21 @@ class ProcessManager:
         (bot_dir / "bot.py").write_text(revision["code"], encoding="utf-8")
         child_db = bot_dir / "bot.sqlite3"
         extra_env = self.db.get_bot_env_vars(bot_id)
-        sandbox_enabled = self.settings.require_bwrap
-        env = self._child_env(
-            bot["token"],
-            "/app/bot.sqlite3" if sandbox_enabled else str(child_db),
-            extra_env,
-        )
-
-        if sandbox_enabled:
-            if not self._host_python_exists(self._resolve_python_bin()):
-                self.db.update_bot_status(bot_id, "python_missing")
-                raise RunnerError(
-                    f"Python executable '{self.settings.python_bin}' was not found. "
-                    "Set PYTHON_BIN to an existing interpreter, for example .venv/bin/python."
-                )
-            if shutil.which(self.settings.bwrap_bin) is None:
-                logger.error("Bubblewrap missing: executable=%s bot_id=%s", self.settings.bwrap_bin, bot_id)
-                self.db.update_bot_status(bot_id, "sandbox_missing")
-                raise RunnerError(
-                    f"Bubblewrap executable '{self.settings.bwrap_bin}' was not found. "
-                    "Install it with: sudo apt install bubblewrap"
-                )
-            try:
-                await self._ensure_bwrap_usable()
-            except RunnerError as exc:
-                logger.error("Bubblewrap unavailable: bot_id=%s error=%s", bot_id, exc)
-                self.db.add_log(
-                    bot_id,
-                    "system",
-                    f"Bubblewrap unavailable: {exc}",
-                    self.settings.log_tail_rows,
-                )
-                if not self.settings.bwrap_fallback_plain:
-                    self.db.update_bot_status(bot_id, "sandbox_unavailable")
-                    raise
-                sandbox_enabled = False
-                env = self._child_env(bot["token"], str(child_db), extra_env)
-                self.db.add_log(
-                    bot_id,
-                    "system",
-                    "Sandbox disabled for this launch because "
-                    "BOTMOTHER_BWRAP_FALLBACK_PLAIN=true. "
-                    "Use only for trusted local testing.",
-                    self.settings.log_tail_rows,
-                )
-                logger.warning(
-                    "Falling back to unsandboxed child launch: bot_id=%s", bot_id
-                )
-            if sandbox_enabled:
-                command = self.build_sandbox_command(bot_dir)
-                cwd = None
-            else:
-                command = self.build_plain_command()
-                cwd = str(bot_dir)
-        else:
-            command = self.build_plain_command()
-            cwd = str(bot_dir)
+        if not self._host_python_exists(self._resolve_python_bin()):
+            self.db.update_bot_status(bot_id, "python_missing")
+            raise RunnerError(
+                f"Python executable '{self.settings.python_bin}' was not found. "
+                "Set PYTHON_BIN to an existing interpreter, for example .venv/bin/python."
+            )
+        env = self._child_env(bot["token"], str(child_db), extra_env)
+        command = self.build_plain_command()
+        cwd = str(bot_dir)
 
         self.db.update_bot_status(bot_id, "starting")
         logger.info(
-            "Starting child bot: bot_id=%s sandbox=%s cwd=%s command=%s",
+            "Starting child bot: bot_id=%s cwd=%s command=%s",
             bot_id,
-            sandbox_enabled,
-            cwd or "-",
+            cwd,
             command,
         )
         process = await asyncio.create_subprocess_exec(

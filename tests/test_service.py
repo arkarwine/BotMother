@@ -152,8 +152,6 @@ def make_settings(tmp: str) -> Settings:
         workdir=Path(tmp) / "bots",
         owner_ids={1},
         python_bin="/usr/bin/python3",
-        bwrap_bin="bwrap",
-        require_bwrap=True,
     )
 
 

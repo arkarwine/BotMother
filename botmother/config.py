@@ -83,9 +83,6 @@ class Settings:
     workdir: Path
     owner_ids: set[int]
     python_bin: str
-    bwrap_bin: str
-    require_bwrap: bool
-    bwrap_fallback_plain: bool = False
     openrouter_interaction_max_tokens: int = 6000
     openrouter_coding_max_tokens: int = 24000
     openrouter_interaction_reasoning_effort: str = "minimal"
@@ -147,11 +144,6 @@ class Settings:
             workdir=_path_from_env(os.getenv("BOTMOTHER_WORKDIR", "./data/bots"), base_dir),
             owner_ids=_owner_ids(os.getenv("OWNER_IDS")),
             python_bin=os.getenv("PYTHON_BIN", "python3").strip() or "python3",
-            bwrap_bin=os.getenv("BWRAP_BIN", "bwrap").strip() or "bwrap",
-            require_bwrap=_bool_from_env(os.getenv("BOTMOTHER_REQUIRE_BWRAP"), True),
-            bwrap_fallback_plain=_bool_from_env(
-                os.getenv("BOTMOTHER_BWRAP_FALLBACK_PLAIN"), False
-            ),
             openrouter_interaction_max_tokens=int(
                 os.getenv("OPENROUTER_INTERACTION_MAX_TOKENS", "6000")
             ),

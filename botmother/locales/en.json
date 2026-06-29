@@ -93,7 +93,7 @@
   "newbot.token_duplicate": "<b>🔁 Token already attached</b>\n\nThis token belongs to <b>{title}</b>.\n\nYour plan is still saved. Paste a different child token, or cancel and manage the existing bot.",
   "newbot.token_duplicate_other": "<b>🔁 Token already attached</b>\n\nThat token is already attached to another active bot.\n\nYour plan is still saved. Paste a different child token.",
   "newbot.expired": "<b>⌛ Plan expired</b>\n\nTap <b>New Bot</b> to start again.",
-  "newbot.launching": "<b>🚀 Launching...</b>\n\nGenerating, validating, sandboxing, and starting the child bot.",
+  "newbot.launching": "<b>🚀 Launching...</b>\n\nGenerating, validating, and starting the child bot.",
   "ask.start_examples": "<b>💬 Ask {title}</b>\n\n<b>Examples</b>\n\n• Why did it stop?\n• What commands does it support?\n• How should I edit it to add payments?",
   "ask.start_short": "<b>💬 Ask {title}</b>\n\nWhat do you want to know?",
   "ask.empty": "<b>✍️ Ask a question</b>\n\nTap <b>Cancel</b> to abort.",

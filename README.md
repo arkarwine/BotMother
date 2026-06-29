@@ -2,7 +2,7 @@
 
 BotMother is a Python + SQLite Telegram mother bot that generates and runs other Telegram bots from user prompts.
 
-The generated child bot is raw standalone Python. There is no user-facing schema, DSL, or generated function wrapper. BotMother strips accidental Markdown fences, runs fast local safety checks, writes `bot.py`, and runs it in a Bubblewrap sandbox on Ubuntu.
+The generated child bot is raw standalone Python. There is no user-facing schema, DSL, or generated function wrapper. BotMother strips accidental Markdown fences, runs fast local safety checks, writes `bot.py`, and runs it as a standalone Python subprocess.
 
 ## Features
 
@@ -22,7 +22,7 @@ The generated child bot is raw standalone Python. There is no user-facing schema
 
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-venv bubblewrap
+sudo apt install -y python3 python3-venv
 
 python3 -m venv .venv
 . .venv/bin/activate
@@ -57,9 +57,6 @@ BOTMOTHER_DB=./data/botmother.sqlite3
 BOTMOTHER_WORKDIR=./data/bots
 OWNER_IDS=123456789
 PYTHON_BIN=python3
-BWRAP_BIN=bwrap
-BOTMOTHER_REQUIRE_BWRAP=true
-BOTMOTHER_BWRAP_FALLBACK_PLAIN=false
 BOTMOTHER_LOG_LEVEL=INFO
 BOTMOTHER_LOG_FILE=./data/botmother.log
 CREDITS_ENABLED=true
@@ -79,16 +76,7 @@ For Ubuntu deployment, the simplest setting is the absolute venv interpreter pat
 PYTHON_BIN=/home/ubuntu/BotMother/.venv/bin/python
 ```
 
-`PYTHON_BIN=/home/ubuntu/BotMother/.venv/bin/python3` also works when that file exists. Check with `ls -l .venv/bin/python*`. If `PYTHON_BIN=python3`, install the Python dependencies into the system Python environment visible inside Bubblewrap.
-
-If a child bot log shows `bwrap: setting up uid map: Permission denied`, the host is blocking Bubblewrap user namespaces. Enable them on Ubuntu:
-
-```bash
-sudo sysctl -w kernel.unprivileged_userns_clone=1
-printf 'kernel.unprivileged_userns_clone=1\n' | sudo tee /etc/sysctl.d/99-botmother-userns.conf
-```
-
-For trusted local testing only, `BOTMOTHER_REQUIRE_BWRAP=false` bypasses the sandbox. You can also keep `BOTMOTHER_REQUIRE_BWRAP=true` and set `BOTMOTHER_BWRAP_FALLBACK_PLAIN=true` to try Bubblewrap first, then launch unsandboxed only when the host denies Bubblewrap user namespaces. Do not use either unsandboxed option for untrusted public bot creation.
+`PYTHON_BIN=/home/ubuntu/BotMother/.venv/bin/python3` also works when that file exists. Check with `ls -l .venv/bin/python*`. If `PYTHON_BIN=python3`, install the Python dependencies into the system Python environment used to launch child bots.
 
 ## Telegram Controls
 
@@ -215,13 +203,12 @@ For existing deployments, `GEMINI_API_KEY` and `GEMINI_MODEL` are still accepted
 
 This is intentionally a testing-mode builder. Child tokens are stored plaintext in SQLite. Generated code is still dangerous by nature, so BotMother uses:
 
-- Bubblewrap process isolation on Ubuntu.
 - Syntax validation with `ast.parse`.
 - A small denylist for obvious host-risk imports and calls.
 - Per-bot work directories.
 - Owner-only `/killall`.
 
-The AST denylist is not a complete security boundary. Bubblewrap is the real isolation layer in this version.
+The AST denylist is not a security boundary. Running AI-generated Python without OS-level isolation is only appropriate for trusted testing environments.
 
 ## Credits
 
