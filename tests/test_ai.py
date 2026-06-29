@@ -2,7 +2,14 @@ import json
 import unittest
 from unittest.mock import patch
 
-from botmother.ai import AIDecision, AIResponseError, OpenRouterCodeGenerator, parse_ai_decision, parse_readiness_decision
+from botmother.ai import (
+    HYBRID_RESPONSE_DELIMITER,
+    AIDecision,
+    AIResponseError,
+    OpenRouterCodeGenerator,
+    parse_ai_decision,
+    parse_readiness_decision,
+)
 
 
 class FakeGenerator(OpenRouterCodeGenerator):
@@ -182,12 +189,12 @@ class AIDecisionTests(unittest.TestCase):
         self.assertTrue(payload["stream"])
         self.assertEqual(payload["stream_options"], {"include_usage": True})
 
-    def test_json_decision_uses_streaming_payload_and_reports_deltas(self):
+    def test_json_decision_streams_only_visible_text_after_delimiter(self):
         generator = OpenRouterCodeGenerator(api_key="sk-test", model="test-model")
-        text = json.dumps(
+        json_text = json.dumps(
             {
                 "type": "questions",
-                "message": "Need admin ID?",
+                "message": "",
                 "questions": [
                     {
                         "id": "admin_id",
@@ -199,7 +206,9 @@ class AIDecisionTests(unittest.TestCase):
                 "env": [],
             }
         )
-        split = len(text) // 2
+        visible_text = "Need admin ID?\n\nWhich admin Telegram user ID should manage it?"
+        text = json_text + "\n" + HYBRID_RESPONSE_DELIMITER + "\n" + visible_text
+        split = text.index(HYBRID_RESPONSE_DELIMITER) + len(HYBRID_RESPONSE_DELIMITER) + 2
         lines = [
             "data: "
             + json.dumps({"choices": [{"delta": {"content": text[:split]}}]})
@@ -220,13 +229,14 @@ class AIDecisionTests(unittest.TestCase):
             )
 
         self.assertTrue(decision.needs_questions)
-        self.assertEqual("".join(deltas), text)
+        self.assertEqual("".join(deltas), visible_text)
+        self.assertEqual(decision.message, visible_text)
         self.assertIsNotNone(decision.ai_usage)
         self.assertEqual(decision.ai_usage.total_tokens, 14)
         request = mocked.call_args.args[0]
         payload = json.loads(request.data.decode("utf-8"))
         self.assertTrue(payload["stream"])
-        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertNotIn("response_format", payload)
 
     def test_empty_json_response_falls_back_instead_of_crashing(self):
         generator = make_generator(["", "", ""])
@@ -529,15 +539,17 @@ class AIDecisionTests(unittest.TestCase):
         self.assertTrue(decision.needs_questions)
         self.assertEqual(decision.questions[0].id, "admin_id")
 
-    def test_check_new_bot_readiness_uses_strict_json(self):
+    def test_check_new_bot_readiness_uses_hybrid_prompt(self):
         generator = make_generator(
             [
                 """
                 {
                   "type": "ready",
-                  "message": "Ready.",
+                  "message": "",
                   "questions": []
                 }
+                <<<BOTMOTHER_RESPONSE_TEXT>>>
+                Ready.
                 """
             ]
         )
@@ -546,8 +558,9 @@ class AIDecisionTests(unittest.TestCase):
         decision = generator.check_new_bot_readiness("make an echo bot", [], code_decision)
 
         self.assertEqual(decision.type, "ready")
+        self.assertEqual(decision.message, "Ready.")
         call = generator.calls[0]
-        self.assertTrue(call["json_mode"])
+        self.assertFalse(call["json_mode"])
         self.assertIn("Final readiness check", call["user_prompt"])
         self.assertIn("Do not ask for the Telegram token", call["user_prompt"])
         self.assertIn("English implementation prompt", call["user_prompt"])

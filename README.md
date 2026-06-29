@@ -192,7 +192,7 @@ BotMother uses OpenRouter and can route different AI jobs to different models:
 
 For New Bot/Edit/Revise, the interaction model first turns the user's request, answers, locale, and relevant requester context into a full English implementation prompt. The coding model receives that Gemini-written prompt instead of raw chat text, so it still gets complete translated context without reading the original conversation directly.
 
-Long AI operations use Telegram Bot API draft streaming via `sendMessageDraft` / `python-telegram-bot`'s `send_message_draft`. Ask Bot streams OpenRouter SSE chunks into the visible answer and Telegram draft as text arrives. Planner/readiness calls use streamed OpenRouter JSON internally for live received-token counters, but BotMother waits for complete valid JSON before showing the clean user-facing question or plan. Generated Python code is not streamed into chat.
+Long AI operations use Telegram Bot API draft streaming via `sendMessageDraft` / `python-telegram-bot`'s `send_message_draft`. Ask Bot streams OpenRouter SSE chunks into the visible answer and Telegram draft as text arrives. Planner/readiness calls use a hybrid response: private JSON first, a `<<<BOTMOTHER_RESPONSE_TEXT>>>` delimiter, then user-facing text. BotMother parses the JSON privately and streams only the text after the delimiter into Telegram. Generated Python code is not streamed into chat.
 
 The default performance/price split is:
 
@@ -275,13 +275,13 @@ Use `🛠️ Auto Fix` or `/fix <id>` when a bot has an error. BotMother sends t
 
 ## AI Follow-Ups
 
-For New Bot and Edit Bot, BotMother asks the interaction model for a strict JSON decision. The decision type is either `questions` or `code`; in this pipeline, `code` means a full English implementation prompt, not Python source. BotMother includes useful Telegram user/chat context, such as user ID, username, names, language code, chat ID, and chat type, so the interaction model can translate relevant context into build requirements without asking for basic identity details. When the AI returns questions, BotMother sends the model's user-facing message directly, then sends the user's answer back into the next AI turn. The structured question fields are internal only, so BotMother does not add visible question numbers, suggestion labels, or follow-up counters. BotMother allows up to 5 internal follow-up rounds; each round may ask as many necessary questions as the schema permits, currently up to 3 at a time.
+For New Bot and Edit Bot, BotMother asks the interaction model for a hybrid decision: private JSON metadata plus streamed user-facing text after `<<<BOTMOTHER_RESPONSE_TEXT>>>`. The decision type is either `questions` or `code`; in this pipeline, `code` means a full English implementation prompt, not Python source. BotMother includes useful Telegram user/chat context, such as user ID, username, names, language code, chat ID, and chat type, so the interaction model can translate relevant context into build requirements without asking for basic identity details. When the AI returns questions, BotMother streams the model's user-facing message directly, then sends the user's answer back into the next AI turn. The structured question fields are internal only, so BotMother does not add visible question numbers, suggestion labels, or follow-up counters. BotMother allows up to 5 internal follow-up rounds; each round may ask as many necessary questions as the schema permits, currently up to 3 at a time.
 
 After the normal `/newbot` questions, BotMother runs a separate readiness check before asking for the BotFather token, including after follow-up answers. This check asks only for missing essential data needed to run the bot, such as required admin IDs, API keys, payment/contact details, or external service settings. It does not ask optional preference questions and it never asks for the Telegram token.
 
 Before saving and launching generated code, BotMother now uses a single-pass deploy path. It does not send generated code back to the AI for refinement, and it does not block on static AST, Telegram hook, or `mypy` quality checks. Only empty source, Python syntax errors, and the security denylist block deployment.
 
-Planner JSON repair is also bounded. If the OpenRouter model returns invalid JSON or tries to set reserved runtime env vars such as `BOT_TOKEN`, BotMother sends the validation error back for up to 2 repair attempts, then falls back to asking the user to restate the request.
+Planner repair is also bounded. If the OpenRouter model returns invalid hybrid JSON/text or tries to set reserved runtime env vars such as `BOT_TOKEN`, BotMother sends the validation error back for up to 2 repair attempts, then falls back to asking the user to restate the request.
 
 ---
 

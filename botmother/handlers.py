@@ -5,7 +5,7 @@ import re
 import uuid
 import asyncio
 import zlib
-from html import escape
+from html import escape, unescape
 from typing import Any
 
 from .ai import MAX_FOLLOWUP_ROUNDS, AIDecision, AIReadinessDecision, AIUsage
@@ -313,6 +313,11 @@ def format_ai_questions(decision: AIDecision | AIReadinessDecision) -> str:
     if message:
         return message
     return "I need a little more detail before building."
+
+
+def html_to_plain_text(text: str) -> str:
+    without_tags = re.sub(r"<[^>]+>", "", text)
+    return unescape(without_tags).strip()
 
 
 def _user_tuple(update: Any) -> tuple[int, str | None, str | None, str | None]:
@@ -1128,12 +1133,15 @@ def build_application(token: str, db: Database, service: BotService):
         max_tokens: int | None = None,
         interval_seconds: float = 6.0,
         stream_queue: asyncio.Queue[str] | None = None,
+        stream_visible_text: bool = False,
     ):
         loop = asyncio.get_running_loop()
         started = loop.time()
         task = asyncio.create_task(awaitable)
         last_update = 0.0
         received_chars = 0
+        streamed_parts: list[str] = []
+        last_rendered = ""
         while not task.done() or (stream_queue is not None and not stream_queue.empty()):
             if stream_queue is None:
                 await asyncio.sleep(interval_seconds)
@@ -1141,26 +1149,39 @@ def build_application(token: str, db: Database, service: BotService):
                 try:
                     delta = await asyncio.wait_for(stream_queue.get(), timeout=0.8)
                     received_chars += len(delta)
+                    streamed_parts.append(delta)
                 except asyncio.TimeoutError:
                     pass
             if task.done() and (stream_queue is None or stream_queue.empty()):
                 break
             now = loop.time()
-            update_interval = 1.0 if received_chars else interval_seconds
+            update_interval = 0.45 if stream_visible_text and received_chars else 1.0 if received_chars else interval_seconds
             if now - last_update < update_interval:
                 continue
             elapsed = int(loop.time() - started)
-            await edit_message_html(
-                progress_message,
-                progress_text(
+            raw_stream = "".join(streamed_parts)
+            visible_preview = raw_stream.strip() if stream_visible_text else ""
+            if visible_preview:
+                rendered = stream_preview_with_usage(
+                    update,
+                    visible_preview,
+                    max_tokens=max_tokens,
+                )
+                if rendered != last_rendered:
+                    await edit_message_plain(progress_message, rendered)
+                    last_rendered = rendered
+            else:
+                rendered = progress_text(
                     update,
                     tr(update, title_key),
                     tr(update, detail_key),
                     elapsed,
                     max_tokens=max_tokens,
                     received_chars=received_chars,
-                ),
-            )
+                )
+                if rendered != last_rendered:
+                    await edit_message_html(progress_message, rendered)
+                    last_rendered = rendered
             last_update = now
         return await task
 
@@ -1447,6 +1468,7 @@ def build_application(token: str, db: Database, service: BotService):
                 "ai.progress_newbot_detail",
                 max_tokens=service.settings.openrouter_interaction_max_tokens,
                 stream_queue=plan_stream_queue,
+                stream_visible_text=True,
             )
         except Exception:
             refund_flow_credits(context, "New Bot planning failed")
@@ -1500,6 +1522,7 @@ def build_application(token: str, db: Database, service: BotService):
                 "ai.progress_readiness_detail",
                 max_tokens=service.settings.openrouter_interaction_max_tokens,
                 stream_queue=readiness_stream_queue,
+                stream_visible_text=True,
             )
         except Exception:
             refund_flow_credits(context, "New Bot readiness check failed")
@@ -2736,6 +2759,7 @@ def build_application(token: str, db: Database, service: BotService):
                 "ai.progress_edit_detail",
                 max_tokens=service.settings.openrouter_interaction_max_tokens,
                 stream_queue=edit_stream_queue,
+                stream_visible_text=True,
             )
         except Exception:
             refund_flow_credits(context, "Edit planning failed")

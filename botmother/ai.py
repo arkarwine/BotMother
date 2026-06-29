@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 MAX_FOLLOWUP_ROUNDS = 5
 MAX_JSON_REPAIR_ATTEMPTS = 2
+HYBRID_RESPONSE_DELIMITER = "<<<BOTMOTHER_RESPONSE_TEXT>>>"
 RUNTIME_PROVIDED_ENV = {
     "BOT_TOKEN": "the child Telegram bot token from BotFather; BotMother injects this at launch",
     "BOT_DB_PATH": "the child bot's SQLite database path; BotMother injects this at launch",
@@ -76,10 +77,15 @@ Important:
 
 JSON_SYSTEM_PROMPT = f"""{BRIEF_SYSTEM_PROMPT}
 
-First decide whether enough detail exists. Return exactly one JSON object:
+First decide whether enough detail exists. Return exactly this two-part format:
+1. One JSON object.
+2. A line containing exactly {HYBRID_RESPONSE_DELIMITER}
+3. The user-facing response text BotMother should stream to Telegram.
+
+JSON object:
 {{
   "type": "questions" | "code",
-  "message": "complete user-facing message BotMother can send verbatim",
+  "message": "optional copy of the streamed response text, or empty string",
   "questions": [
     {{
       "id": "lower_snake_case_id",
@@ -94,12 +100,14 @@ First decide whether enough detail exists. Return exactly one JSON object:
 }}
 
 Rules:
-- JSON only. No Markdown/prose.
+- Do not use Markdown fences.
+- Do not put prose before the JSON object.
+- The delimiter line is mandatory.
+- The text after {HYBRID_RESPONSE_DELIMITER} is the only text the user sees while streaming.
 - Ask every material question needed when behavior, storage, commands, admin policy, schedules, external services, env vars, products, payments, operators, or workflows are required and unclear.
-- Use the Requester context BotMother locale for every user-facing JSON message and question. If BotMother locale is "my", write Myanmar/Burmese. If it is "en", write English.
+- Use the Requester context BotMother locale for every user-facing question and for the response text after the delimiter. If BotMother locale is "my", write Myanmar/Burmese. If it is "en", write English.
 - Ask as many questions as are necessary in this turn, up to the schema limit of 3 at a time.
-- For type "questions", "questions" is mandatory and must contain the exact concrete user-facing question(s).
-- Do not put only a preamble in "message". If "message" asks for more details, it must also include the concrete question text from "questions".
+- For type "questions", "questions" is mandatory and must contain the exact concrete user-facing question(s). The response text after the delimiter must include those concrete question(s), not only a preamble.
 - For code: return a full, comprehensive English implementation prompt in "code", not Python source. Include the product goal, target users, target child-bot UI language, admin policy, workflows, data to persist, required buttons/menus, env var names, runtime contract, edge cases, inferred defaults, and acceptance criteria.
 - Make the implementation prompt complete enough for the coding model to build without reading the raw chat.
 - Include env only for explicit user-provided non-runtime values. Do not invent secrets.
@@ -117,10 +125,15 @@ Be concise, practical, and answer in the BotMother locale from the provided cont
 
 READINESS_SYSTEM_PROMPT = f"""Final requirements checker before BotMother asks for the child BotFather token.
 
-Return exactly one JSON object:
+Return exactly this two-part format:
+1. One JSON object.
+2. A line containing exactly {HYBRID_RESPONSE_DELIMITER}
+3. The user-facing response text BotMother should stream to Telegram.
+
+JSON object:
 {{
   "type": "ready" | "questions",
-  "message": "complete user-facing message BotMother can send verbatim",
+  "message": "optional copy of the streamed response text, or empty string",
   "questions": [
     {{
       "id": "lower_snake_case_id",
@@ -131,15 +144,17 @@ Return exactly one JSON object:
 }}
 
 Rules:
-- JSON only. No Markdown/prose.
-- Use the Requester context BotMother locale for every user-facing JSON message and question. If BotMother locale is "my", write Myanmar/Burmese. If it is "en", write English.
+- Do not use Markdown fences.
+- Do not put prose before the JSON object.
+- The delimiter line is mandatory.
+- The text after {HYBRID_RESPONSE_DELIMITER} is the only text the user sees while streaming.
+- Use the Requester context BotMother locale for every user-facing question and for the response text after the delimiter. If BotMother locale is "my", write Myanmar/Burmese. If it is "en", write English.
 - Check only missing essentials required for the requested bot to run usefully: required auth/config, admins/operators, payment/contact info, or core workflow data.
 - Do not ask optional preference/polish questions.
 - Never ask for Telegram/BotFather token or runtime env vars ({", ".join(sorted(RESERVED_ENV_NAMES))}); BotMother injects them.
 - Check the English implementation prompt, not Python source.
 - Use "ready" if no necessary build/run data is missing from the prompt; otherwise ask every necessary missing question, up to 3 at a time.
-- For type "questions", "questions" is mandatory and must contain the exact concrete user-facing question(s).
-- Do not put only a preamble in "message". If "message" asks for more details, it must also include the concrete question text from "questions".
+- For type "questions", "questions" is mandatory and must contain the exact concrete user-facing question(s). The response text after the delimiter must include those concrete question(s), not only a preamble.
 """
 
 
@@ -170,6 +185,37 @@ READINESS_KEYS = {"type", "message", "questions"}
 
 class AIResponseError(RuntimeError):
     pass
+
+
+@dataclass
+class HybridStreamSplitter:
+    on_visible_delta: Callable[[str], None]
+    delimiter: str = HYBRID_RESPONSE_DELIMITER
+    _buffer: str = ""
+    _streaming_visible: bool = False
+
+    def __call__(self, delta: str) -> None:
+        if not delta:
+            return
+        if self._streaming_visible:
+            self.on_visible_delta(delta)
+            return
+
+        self._buffer += delta
+        delimiter_index = self._buffer.find(self.delimiter)
+        if delimiter_index < 0:
+            # Keep enough trailing text to detect a delimiter split across chunks.
+            keep = max(0, len(self.delimiter) - 1)
+            if len(self._buffer) > keep:
+                self._buffer = self._buffer[-keep:]
+            return
+
+        self._streaming_visible = True
+        visible = self._buffer[delimiter_index + len(self.delimiter) :]
+        self._buffer = ""
+        visible = visible.lstrip("\r\n")
+        if visible:
+            self.on_visible_delta(visible)
 
 
 @dataclass(frozen=True)
@@ -264,6 +310,46 @@ def _strip_json_fence(text: str) -> str:
     return stripped
 
 
+def _split_hybrid_response(text: str) -> tuple[str, str | None]:
+    stripped = text.strip()
+    if HYBRID_RESPONSE_DELIMITER not in stripped:
+        return stripped, None
+    json_text, visible_text = stripped.split(HYBRID_RESPONSE_DELIMITER, 1)
+    return json_text.strip(), visible_text.strip()
+
+
+def _with_visible_decision_message(
+    decision: AIDecision, visible_text: str | None
+) -> AIDecision:
+    if not visible_text:
+        return decision
+    _reject_empty_question_message(visible_text, decision.questions)
+    _reject_choice_prompt_without_suggestions(visible_text, decision.questions)
+    return AIDecision(
+        decision.type,
+        visible_text.strip(),
+        decision.questions,
+        decision.code,
+        decision.env,
+        decision.ai_usage,
+    )
+
+
+def _with_visible_readiness_message(
+    decision: AIReadinessDecision, visible_text: str | None
+) -> AIReadinessDecision:
+    if not visible_text:
+        return decision
+    _reject_empty_question_message(visible_text, decision.questions)
+    _reject_choice_prompt_without_suggestions(visible_text, decision.questions)
+    return AIReadinessDecision(
+        decision.type,
+        visible_text.strip(),
+        decision.questions,
+        decision.ai_usage,
+    )
+
+
 def _expect_str(value: Any, field: str, allow_empty: bool = False) -> str:
     if not isinstance(value, str):
         raise AIResponseError(f"AI JSON field '{field}' must be a string.")
@@ -298,8 +384,9 @@ def _reject_choice_prompt_without_suggestions(
 
 
 def parse_ai_decision(text: str) -> AIDecision:
+    json_text, visible_text = _split_hybrid_response(text)
     try:
-        data = json.loads(_strip_json_fence(text))
+        data = json.loads(_strip_json_fence(json_text))
     except json.JSONDecodeError as exc:
         raise AIResponseError(f"AI returned invalid JSON: {exc.msg}") from exc
 
@@ -395,13 +482,19 @@ def parse_ai_decision(text: str) -> AIDecision:
             raise AIResponseError(
                 "AI JSON type 'questions' must not include env values."
             )
-        return AIDecision("questions", message, parsed_questions, None, ())
+        return _with_visible_decision_message(
+            AIDecision("questions", message, parsed_questions, None, ()),
+            visible_text,
+        )
 
     if not isinstance(code, str) or not code.strip():
         raise AIResponseError("AI JSON type 'code' requires non-empty code.")
     if questions:
         raise AIResponseError("AI JSON type 'code' must not include questions.")
-    return AIDecision("code", message, (), code, tuple(env))
+    return _with_visible_decision_message(
+        AIDecision("code", message, (), code, tuple(env)),
+        visible_text,
+    )
 
 
 def _parse_questions(data: dict[str, Any]) -> tuple[AIQuestion, ...]:
@@ -438,8 +531,9 @@ def _parse_questions(data: dict[str, Any]) -> tuple[AIQuestion, ...]:
 
 
 def parse_readiness_decision(text: str) -> AIReadinessDecision:
+    json_text, visible_text = _split_hybrid_response(text)
     try:
-        data = json.loads(_strip_json_fence(text))
+        data = json.loads(_strip_json_fence(json_text))
     except json.JSONDecodeError as exc:
         raise AIResponseError(f"AI returned invalid readiness JSON: {exc.msg}") from exc
 
@@ -466,7 +560,10 @@ def parse_readiness_decision(text: str) -> AIReadinessDecision:
             raise AIResponseError(
                 "AI readiness JSON type 'ready' must not include questions."
             )
-        return AIReadinessDecision("ready", message, ())
+        return _with_visible_readiness_message(
+            AIReadinessDecision("ready", message, ()),
+            visible_text,
+        )
 
     if not questions:
         raise AIResponseError(
@@ -476,7 +573,10 @@ def parse_readiness_decision(text: str) -> AIReadinessDecision:
         raise AIResponseError(
             "AI readiness JSON may ask at most 3 questions at a time."
         )
-    return AIReadinessDecision("questions", message, questions)
+    return _with_visible_readiness_message(
+        AIReadinessDecision("questions", message, questions),
+        visible_text,
+    )
 
 
 def format_answer_history(answer_history: list[dict[str, Any]]) -> str:
@@ -950,17 +1050,18 @@ class OpenRouterCodeGenerator:
             result = self._chat_result(
                 JSON_SYSTEM_PROMPT,
                 prompt,
-                json_mode=True,
+                json_mode=False,
                 model=self.interaction_model,
             )
         else:
+            visible_delta = HybridStreamSplitter(on_delta)
             try:
                 result = self._chat_stream_result(
                     JSON_SYSTEM_PROMPT,
                     prompt,
-                    json_mode=True,
+                    json_mode=False,
                     model=self.interaction_model,
-                    on_delta=on_delta,
+                    on_delta=visible_delta,
                 )
             except RuntimeError:
                 logger.warning(
@@ -970,7 +1071,7 @@ class OpenRouterCodeGenerator:
                 result = self._chat_result(
                     JSON_SYSTEM_PROMPT,
                     prompt,
-                    json_mode=True,
+                    json_mode=False,
                     model=self.interaction_model,
                 )
         if not result.text:
@@ -988,17 +1089,18 @@ class OpenRouterCodeGenerator:
             result = self._chat_result(
                 READINESS_SYSTEM_PROMPT,
                 prompt,
-                json_mode=True,
+                json_mode=False,
                 model=self.interaction_model,
             )
         else:
+            visible_delta = HybridStreamSplitter(on_delta)
             try:
                 result = self._chat_stream_result(
                     READINESS_SYSTEM_PROMPT,
                     prompt,
-                    json_mode=True,
+                    json_mode=False,
                     model=self.interaction_model,
-                    on_delta=on_delta,
+                    on_delta=visible_delta,
                 )
             except RuntimeError:
                 logger.warning(
@@ -1008,7 +1110,7 @@ class OpenRouterCodeGenerator:
                 result = self._chat_result(
                     READINESS_SYSTEM_PROMPT,
                     prompt,
-                    json_mode=True,
+                    json_mode=False,
                     model=self.interaction_model,
                 )
         if not result.text:
@@ -1034,7 +1136,7 @@ class OpenRouterCodeGenerator:
             f"{original_prompt}\n\n"
             "Your invalid response was:\n"
             f"{invalid_text.strip()[:6000]}\n\n"
-            "Return one corrected JSON object only. No Markdown and no prose outside JSON."
+            f"Return the corrected two-part response only: JSON object, delimiter line {HYBRID_RESPONSE_DELIMITER}, then the user-facing response text. No Markdown fences."
         )
 
     def _fallback_questions_after_bad_json(self, error: str) -> AIDecision:
@@ -1085,7 +1187,10 @@ class OpenRouterCodeGenerator:
         for attempt in range(MAX_JSON_REPAIR_ATTEMPTS + 1):
             text = ""
             try:
-                result = self._generate_json_result(current_prompt, on_delta=on_delta)
+                result = self._generate_json_result(
+                    current_prompt,
+                    on_delta=on_delta if attempt == 0 else None,
+                )
                 text = result.text
                 decision = parse_ai_decision(text)
             except AIResponseError as exc:
@@ -1132,7 +1237,7 @@ class OpenRouterCodeGenerator:
             f"{original_prompt}\n\n"
             "Your invalid response was:\n"
             f"{invalid_text.strip()[:6000]}\n\n"
-            "Return one corrected JSON object only. No Markdown and no prose outside JSON."
+            f"Return the corrected two-part response only: JSON object, delimiter line {HYBRID_RESPONSE_DELIMITER}, then the user-facing response text. No Markdown fences."
         )
 
     def _generate_readiness_decision(
@@ -1143,7 +1248,10 @@ class OpenRouterCodeGenerator:
         for attempt in range(MAX_JSON_REPAIR_ATTEMPTS + 1):
             text = ""
             try:
-                result = self._generate_readiness_result(current_prompt, on_delta=on_delta)
+                result = self._generate_readiness_result(
+                    current_prompt,
+                    on_delta=on_delta if attempt == 0 else None,
+                )
                 text = result.text
                 decision = parse_readiness_decision(text)
             except AIResponseError as exc:
