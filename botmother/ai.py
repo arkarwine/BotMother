@@ -89,8 +89,8 @@ JSON object:
   "questions": [
     {{
       "id": "lower_snake_case_id",
-      "question": "one clear question",
-      "suggestions": ["optional short suggested answer", "optional short suggested answer"]
+      "question": "one clear question written for a non-technical user",
+      "suggestions": ["optional clear answer choice", "optional clear answer choice"]
     }}
   ],
   "code": "full comprehensive English implementation prompt when type is code, otherwise null",
@@ -106,8 +106,10 @@ Rules:
 - The text after {HYBRID_RESPONSE_DELIMITER} is the only text the user sees while streaming.
 - Ask every material question needed when behavior, storage, commands, admin policy, schedules, external services, env vars, products, payments, operators, or workflows are required and unclear.
 - Use the Requester context BotMother locale for every user-facing question and for the response text after the delimiter. If BotMother locale is "my", write Myanmar/Burmese. If it is "en", write English.
-- Ask as many questions as are necessary in this turn, up to the schema limit of 3 at a time.
-- For type "questions", "questions" is mandatory and must contain the exact concrete user-facing question(s). The response text after the delimiter must include those concrete question(s), not only a preamble.
+- Ask as many questions as are necessary in this turn. There is no fixed question limit.
+- Prefer useful answer choices in "suggestions" whenever the user can choose between common options. Do not limit the number of choices if more are genuinely useful.
+- Write questions for a layperson. Avoid technical jargon where possible. If a technical term is necessary, explain what it means, why it is required, and how the user can obtain it.
+- For type "questions", "questions" is mandatory and must contain the exact concrete user-facing question(s). The response text after the delimiter may be a short friendly intro; BotMother will render the numbered questions and choices from JSON.
 - For code: return a full, comprehensive English implementation prompt in "code", not Python source. Include the product goal, target users, target child-bot UI language, admin policy, workflows, data to persist, required buttons/menus, env var names, runtime contract, edge cases, inferred defaults, and acceptance criteria.
 - Make the implementation prompt complete enough for the coding model to build without reading the raw chat.
 - Include env only for explicit user-provided non-runtime values. Do not invent secrets.
@@ -137,8 +139,8 @@ JSON object:
   "questions": [
     {{
       "id": "lower_snake_case_id",
-      "question": "one clear question",
-      "suggestions": ["optional short suggested answer", "optional short suggested answer"]
+      "question": "one clear question written for a non-technical user",
+      "suggestions": ["optional clear answer choice", "optional clear answer choice"]
     }}
   ]
 }}
@@ -153,8 +155,10 @@ Rules:
 - Do not ask optional preference/polish questions.
 - Never ask for Telegram/BotFather token or runtime env vars ({", ".join(sorted(RESERVED_ENV_NAMES))}); BotMother injects them.
 - Check the English implementation prompt, not Python source.
-- Use "ready" if no necessary build/run data is missing from the prompt; otherwise ask every necessary missing question, up to 3 at a time.
-- For type "questions", "questions" is mandatory and must contain the exact concrete user-facing question(s). The response text after the delimiter must include those concrete question(s), not only a preamble.
+- Use "ready" if no necessary build/run data is missing from the prompt; otherwise ask every necessary missing question. There is no fixed question limit.
+- Prefer useful answer choices in "suggestions" whenever the user can choose between common options. Do not limit the number of choices if more are genuinely useful.
+- Write questions for a layperson. Avoid technical jargon where possible. If a technical term is necessary, explain what it means, why it is required, and how the user can obtain it.
+- For type "questions", "questions" is mandatory and must contain the exact concrete user-facing question(s). The response text after the delimiter may be a short friendly intro; BotMother will render the numbered questions and choices from JSON.
 """
 
 
@@ -474,8 +478,6 @@ def parse_ai_decision(text: str) -> AIDecision:
             raise AIResponseError(
                 "AI JSON type 'questions' requires at least one question."
             )
-        if len(questions) > 3:
-            raise AIResponseError("AI JSON may ask at most 3 questions at a time.")
         if code not in {None, ""}:
             raise AIResponseError("AI JSON type 'questions' must not include code.")
         if env:
@@ -568,10 +570,6 @@ def parse_readiness_decision(text: str) -> AIReadinessDecision:
     if not questions:
         raise AIResponseError(
             "AI readiness JSON type 'questions' requires at least one question."
-        )
-    if len(questions) > 3:
-        raise AIResponseError(
-            "AI readiness JSON may ask at most 3 questions at a time."
         )
     return _with_visible_readiness_message(
         AIReadinessDecision("questions", message, questions),

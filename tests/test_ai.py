@@ -337,6 +337,24 @@ class AIDecisionTests(unittest.TestCase):
         self.assertEqual(decision.questions[0].id, "weather_source")
         self.assertEqual(decision.questions[0].suggestions, ("OpenWeather", "No external API"))
 
+    def test_parse_questions_decision_allows_more_than_three_questions(self):
+        questions = [
+            {"id": f"q_{index}", "question": f"Question {index}?", "suggestions": []}
+            for index in range(5)
+        ]
+        payload = {
+            "type": "questions",
+            "message": "I need a few details.",
+            "questions": questions,
+            "code": None,
+            "env": [],
+        }
+
+        decision = parse_ai_decision(json.dumps(payload))
+
+        self.assertTrue(decision.needs_questions)
+        self.assertEqual(len(decision.questions), 5)
+
     def test_parse_code_decision_with_env(self):
         decision = parse_ai_decision(
             """
@@ -578,6 +596,22 @@ class AIDecisionTests(unittest.TestCase):
 
         self.assertTrue(decision.needs_questions)
         self.assertEqual(decision.questions[0].id, "admin_id")
+
+    def test_parse_readiness_questions_allows_more_than_three_questions(self):
+        questions = [
+            {"id": f"q_{index}", "question": f"Question {index}?", "suggestions": []}
+            for index in range(4)
+        ]
+        payload = {
+            "type": "questions",
+            "message": "Missing launch details.",
+            "questions": questions,
+        }
+
+        decision = parse_readiness_decision(json.dumps(payload))
+
+        self.assertTrue(decision.needs_questions)
+        self.assertEqual(len(decision.questions), 4)
 
     def test_check_new_bot_readiness_uses_hybrid_prompt(self):
         generator = make_generator(

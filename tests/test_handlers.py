@@ -226,6 +226,34 @@ class HandlerHelperTests(unittest.TestCase):
         self.assertNotIn("Suggestions:", text)
         self.assertNotIn("Follow-up", text)
 
+    def test_format_ai_questions_numbers_questions_and_choices(self):
+        decision = AIDecision(
+            "questions",
+            "I need a few details before building this.",
+            (
+                AIQuestion(
+                    "products",
+                    "How should customers browse your products?",
+                    ("Show a fixed list", "Let admins add products inside Telegram"),
+                ),
+                AIQuestion(
+                    "payment",
+                    "How should customers pay?",
+                    ("KPay phone number", "KPay QR image", "Cash on delivery"),
+                ),
+            ),
+            None,
+            (),
+        )
+
+        text = format_ai_questions(decision)
+
+        self.assertIn("1. How should customers browse your products?", text)
+        self.assertIn("2. How should customers pay?", text)
+        self.assertIn("Choices:\nA. Show a fixed list", text)
+        self.assertIn("B. Let admins add products inside Telegram", text)
+        self.assertIn("C. Cash on delivery", text)
+
     def test_format_ai_questions_never_drops_questions_for_vague_preamble(self):
         decision = AIDecision(
             "questions",

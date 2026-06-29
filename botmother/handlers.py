@@ -296,21 +296,64 @@ def strip_question_sentences(message: str) -> str:
     return " ".join(kept).strip()
 
 
+def contains_myanmar_text(text: str) -> bool:
+    return any("\u1000" <= char <= "\u109f" for char in text)
+
+
+def choice_label(index: int) -> str:
+    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    if index < len(letters):
+        return letters[index]
+    return str(index + 1)
+
+
+def format_question_choices(question: AIQuestion, use_myanmar: bool) -> str:
+    suggestions = [choice.strip() for choice in question.suggestions if choice.strip()]
+    if not suggestions:
+        return ""
+    title = "ရွေးချယ်စရာများ" if use_myanmar else "Choices"
+    lines = [f"{title}:"]
+    for index, suggestion in enumerate(suggestions):
+        lines.append(f"{choice_label(index)}. {escape(suggestion)}")
+    return "\n".join(lines)
+
+
+def format_numbered_question(
+    index: int, question: AIQuestion, use_myanmar: bool
+) -> str:
+    text = escape(question.question.strip())
+    block = f"{index + 1}. {text}"
+    choices = format_question_choices(question, use_myanmar)
+    if choices:
+        block += "\n\n" + choices
+    return block
+
+
 def format_ai_questions(decision: AIDecision | AIReadinessDecision) -> str:
     if decision.needs_questions and not decision.questions:
         return "I need a little more detail before building."
-    questions = [question.question.strip() for question in decision.questions if question.question.strip()]
     message = decision.message.strip()
+    questions = [question for question in decision.questions if question.question.strip()]
+    use_myanmar = contains_myanmar_text(
+        " ".join([message] + [question.question for question in questions])
+    )
     if decision.needs_questions and questions:
         message = strip_question_sentences(message)
-        visible_questions = [question for question in questions if question not in message]
-        if message and visible_questions:
-            return message + "\n\n" + "\n\n".join(visible_questions)
+        question_blocks = [
+            format_numbered_question(index, question, use_myanmar)
+            for index, question in enumerate(questions)
+            if question.question.strip() not in message
+        ]
+        if message and question_blocks:
+            return escape(message) + "\n\n" + "\n\n".join(question_blocks)
         if message:
-            return message
-        return "\n\n".join(questions)
+            return escape(message)
+        return "\n\n".join(
+            format_numbered_question(index, question, use_myanmar)
+            for index, question in enumerate(questions)
+        )
     if message:
-        return message
+        return escape(message)
     return "I need a little more detail before building."
 
 
