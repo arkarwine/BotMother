@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 
 MAX_FOLLOWUP_ROUNDS = 5
 MAX_JSON_REPAIR_ATTEMPTS = 2
-AI_REFINEMENT_LAYERS = 2
 RUNTIME_PROVIDED_ENV = {
     "BOT_TOKEN": "the child Telegram bot token from BotFather; BotMother injects this at launch",
     "BOT_DB_PATH": "the child bot's SQLite database path; BotMother injects this at launch",
@@ -964,52 +963,6 @@ class OpenRouterCodeGenerator:
             return text
         logger.error("OpenRouter returned an empty edit response")
         raise AIResponseError("OpenRouter returned an empty edit response.")
-
-    def refine_code_for_deploy(
-        self,
-        user_prompt: str,
-        current_code: str,
-        env_names: list[str],
-        layer: int,
-        total_layers: int,
-        validation_error: str | None = None,
-        user_context: str = "",
-    ) -> str:
-        logger.info(
-            "Refining child bot code: model=%s layer=%s/%s code_chars=%s validation_error=%s",
-            self.coding_model,
-            layer,
-            total_layers,
-            len(current_code),
-            validation_error or "-",
-        )
-        focus = {
-            1: "product completeness, onboarding, navigation, admin/user workflows",
-            2: "reliability, async correctness, persistence, validation, recovery, UX polish",
-            3: "deployment polish, command coverage, formatting, forbidden-API cleanup",
-        }.get(layer, "product completeness and deployment readiness")
-        prompt = (
-            "Extend, bloat and refine aggresively before deployment. Return only complete standalone Python source; no Markdown, JSON, prose, or diff.\n\n"
-            f"Layer {layer}/{total_layers} focus: {focus}.\n"
-            "Preserve the core goal, make strong product decisions, and expand weak/toy code into a complete button-first bot when appropriate. Extend aggresively. Do not ask questions.\n"
-            "Keep runtime contract: read BOT_TOKEN and BOT_DB_PATH from env; do not hardcode secrets or require env vars except provided names/runtime vars. "
-            "Use only stdlib, sqlite3, python-telegram-bot. Keep commands registered, global error handler present, formatting safe, and forbidden APIs absent.\n\n"
-            f"Provided child env var names: {', '.join(env_names) if env_names else 'none'}\n"
-            f"Previous validation issue: {validation_error or 'none'}\n\n"
-            f"English implementation brief:\n{user_prompt.strip()}\n\n"
-            "Current source:\n"
-            "```python\n"
-            f"{current_code.strip()}\n"
-            "```"
-        )
-        text = self._chat(SYSTEM_PROMPT, prompt, model=self.coding_model)
-        if text and text.strip():
-            logger.info(
-                "OpenRouter returned refined code: layer=%s chars=%s", layer, len(text)
-            )
-            return text
-        logger.error("OpenRouter returned an empty refinement response: layer=%s", layer)
-        raise AIResponseError("OpenRouter returned an empty refinement response.")
 
     def answer_bot_question(self, bot_context: str, question: str) -> str:
         logger.info(

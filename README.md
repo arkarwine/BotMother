@@ -2,7 +2,7 @@
 
 BotMother is a Python + SQLite Telegram mother bot that generates and runs other Telegram bots from user prompts.
 
-The generated child bot is raw standalone Python. There is no user-facing schema, DSL, or generated function wrapper. BotMother strips accidental Markdown fences, validates the Python, writes `bot.py`, and runs it in a Bubblewrap sandbox on Ubuntu.
+The generated child bot is raw standalone Python. There is no user-facing schema, DSL, or generated function wrapper. BotMother strips accidental Markdown fences, runs fast local safety checks, writes `bot.py`, and runs it in a Bubblewrap sandbox on Ubuntu.
 
 ## Features
 
@@ -15,7 +15,7 @@ The generated child bot is raw standalone Python. There is no user-facing schema
 - Paginated bot/admin lists and simple search commands.
 - AI can ask follow-up questions before creating or editing a bot.
 - AI runs a final essential-data readiness check before asking for the child bot token.
-- AI runs several raw-Python refinement passes before deployment.
+- Generated code is single-pass after the coding model returns it; BotMother does not run slow AI refinement passes before deployment.
 - Child bots are run as standalone Python subprocesses with only `BOT_TOKEN` and `BOT_DB_PATH` in their contract.
 
 ## Ubuntu Setup
@@ -173,7 +173,7 @@ AI planning, follow-up questions, readiness checks, Ask Bot answers, and generat
 BotMother uses OpenRouter and can route different AI jobs to different models:
 
 - `OPENROUTER_INTERACTION_MODEL` handles user-facing planning, follow-up questions, readiness checks, and Ask Bot answers.
-- `OPENROUTER_CODING_MODEL` handles raw Python generation, prompt edits, and refinement layers.
+- `OPENROUTER_CODING_MODEL` handles raw Python generation and prompt edits.
 - `OPENROUTER_MODEL` is an optional fallback when a role-specific model is not set.
 - `OPENROUTER_INTERACTION_MAX_TOKENS` and `OPENROUTER_CODING_MAX_TOKENS` set explicit completion budgets so routed providers do not silently use tiny defaults.
 - `OPENROUTER_*_REASONING_EFFORT` controls how much reasoning budget OpenRouter should request for each role; use an empty value to let the provider choose.
@@ -201,7 +201,6 @@ This is intentionally a testing-mode builder. Child tokens are stored plaintext 
 - Bubblewrap process isolation on Ubuntu.
 - Syntax validation with `ast.parse`.
 - A small denylist for obvious host-risk imports and calls.
-- Static checks for obvious generated-code bugs, including a lightweight AST pass and a `mypy` pass when installed.
 - Per-bot work directories.
 - Owner-only `/killall`.
 
@@ -251,13 +250,13 @@ Negative child process return codes mean Linux signals. For example, `rc=-2` is 
 
 ## Prompt Editing
 
-Tap `✏️ Edit Bot`, choose the bot, then describe the change you want in normal language, for example `add a help menu with buttons` or `make the bot remember birthdays`. BotMother lets the AI ask follow-up questions, edits the existing generated Python internally, validates the new revision, saves it, and restarts the child bot when the edit is valid.
+Tap `✏️ Edit Bot`, choose the bot, then describe the change you want in normal language, for example `add a help menu with buttons` or `make the bot remember birthdays`. BotMother lets the AI ask follow-up questions, edits the existing generated Python internally, runs fast safety checks, saves it, and restarts the child bot when it is allowed.
 
 ## Templates, Dashboard, And Auto Fix
 
 New Bot starts with a mode picker: Shop, Booking, Support, Quiz, Channel, or Other. The selected mode is added as hidden planning context, so users still describe the bot naturally while the interaction model builds a stronger English implementation prompt.
 
-Each child bot page now acts as a dashboard with username, status, process state, PID, owner, revision count, env var names, validation summary, and the latest issue from recent logs. The `🧪 Validation` action shows the syntax, security, static AST, Telegram hook, and mypy layers.
+Each child bot page now acts as a dashboard with username, status, process state, PID, owner, revision count, env var names, validation summary, and the latest issue from recent logs. The `🧪 Validation` action shows the fast local checks: source, syntax, and security denylist.
 
 Use `🛠️ Auto Fix` or `/fix <id>` when a bot has an error. BotMother sends the latest source, original prompt, validation report, env names, status, and recent logs to the AI as a targeted edit request, then validates and restarts the bot through the normal edit pipeline.
 
@@ -267,7 +266,7 @@ For New Bot and Edit Bot, BotMother asks the interaction model for a strict JSON
 
 After the normal `/newbot` questions, BotMother runs a separate readiness check before asking for the BotFather token, including after follow-up answers. This check asks only for missing essential data needed to run the bot, such as required admin IDs, API keys, payment/contact details, or external service settings. It does not ask optional preference questions and it never asks for the Telegram token.
 
-Before saving and launching generated code, BotMother runs bounded AI refinement layers. Each layer must return raw standalone Python. BotMother validates each candidate with syntax, denylist, static AST, required Telegram UX hooks, and `mypy` checks, then keeps the last valid version, so a bad refinement pass cannot overwrite a deployable previous pass.
+Before saving and launching generated code, BotMother now uses a single-pass deploy path. It does not send generated code back to the AI for refinement, and it does not block on static AST, Telegram hook, or `mypy` quality checks. Only empty source, Python syntax errors, and the security denylist block deployment.
 
 Planner JSON repair is also bounded. If the OpenRouter model returns invalid JSON or tries to set reserved runtime env vars such as `BOT_TOKEN`, BotMother sends the validation error back for up to 2 repair attempts, then falls back to asking the user to restate the request.
 

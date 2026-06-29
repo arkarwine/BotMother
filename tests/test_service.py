@@ -67,7 +67,6 @@ class FakeGenerator:
         self.force_code = None
         self.bot_context = None
         self.bot_question = None
-        self.refinement_calls = []
         self.coding_brief_calls = []
         self.new_bot_calls = 0
         self.new_bot_prompt = None
@@ -129,29 +128,6 @@ class FakeGenerator:
         self.edit_code_prompt = edit_prompt
         self.user_context = user_context
         return self.edited_code
-
-    def refine_code_for_deploy(
-        self,
-        user_prompt: str,
-        current_code: str,
-        env_names,
-        layer: int,
-        total_layers: int,
-        validation_error=None,
-        user_context: str = "",
-    ) -> str:
-        self.refinement_calls.append(
-            {
-                "prompt": user_prompt,
-                "code": current_code,
-                "env_names": list(env_names),
-                "layer": layer,
-                "total_layers": total_layers,
-                "validation_error": validation_error,
-                "user_context": user_context,
-            }
-        )
-        return current_code
 
 
 def make_settings(tmp: str) -> Settings:
@@ -286,7 +262,6 @@ class ServiceEditTests(unittest.TestCase):
             self.assertEqual(db.get_bot_env_vars(bot_id), {"WEATHER_API_KEY": "secret"})
             self.assertEqual(generator.current_code, OLD_BOT_CODE)
             self.assertEqual(generator.edit_prompt, "make it friendlier")
-            self.assertEqual(len(generator.refinement_calls), 0)
 
     def test_get_source_returns_latest_revision(self):
         with tempfile.TemporaryDirectory() as tmp:

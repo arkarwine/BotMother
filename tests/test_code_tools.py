@@ -1,10 +1,7 @@
 import unittest
-from subprocess import CompletedProcess
-from unittest.mock import patch
 
 from botmother.code_tools import (
     extract_python_code,
-    run_mypy_static_check,
     validate_generated_code,
     validate_generated_code_report,
 )
@@ -47,13 +44,13 @@ class CodeToolsTests(unittest.TestCase):
 
         self.assertIn("Syntax", names)
         self.assertIn("Security", names)
-        self.assertIn("Static AST", names)
-        self.assertIn("Telegram UX hooks", names)
+        self.assertNotIn("Static AST", names)
+        self.assertNotIn("Telegram UX hooks", names)
+        self.assertNotIn("Mypy", names)
 
-    def test_validate_requires_global_error_handler(self):
+    def test_validate_does_not_require_global_error_handler(self):
         result = validate_generated_code("import os\nprint(os.environ['BOT_TOKEN'])")
-        self.assertFalse(result.ok)
-        self.assertIn("add_error_handler", result.error)
+        self.assertTrue(result.ok, result.error)
 
     def test_validate_rejects_legacy_markdown_parse_mode(self):
         result = validate_generated_code(
@@ -86,7 +83,7 @@ class CodeToolsTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("legacy", result.error)
 
-    def test_validate_requires_command_menu_registration(self):
+    def test_validate_does_not_require_command_menu_registration(self):
         result = validate_generated_code(
             "from typing import Any\n"
             "async def error_handler(update, context):\n"
@@ -95,8 +92,7 @@ class CodeToolsTests(unittest.TestCase):
             "    application: Any = object()\n"
             "    application.add_error_handler(error_handler)\n"
         )
-        self.assertFalse(result.ok)
-        self.assertIn("set_my_commands", result.error)
+        self.assertTrue(result.ok, result.error)
 
     def test_validate_rejects_syntax_error(self):
         result = validate_generated_code("def nope(:\n    pass")
@@ -125,7 +121,7 @@ class CodeToolsTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("eval", result.error)
 
-    def test_static_check_rejects_undefined_handler_name(self):
+    def test_static_check_does_not_block_undefined_handler_name(self):
         result = validate_generated_code(
             "from typing import Any\n"
             "from telegram.ext import CommandHandler\n"
@@ -138,11 +134,9 @@ class CodeToolsTests(unittest.TestCase):
             "    application.add_error_handler(error_handler)\n"
             "    application.add_handler(CommandHandler('start', missing_start))\n"
         )
-        self.assertFalse(result.ok)
-        self.assertIn("Static type check", result.error)
-        self.assertIn("missing_start", result.error)
+        self.assertTrue(result.ok, result.error)
 
-    def test_static_check_rejects_local_use_before_assignment(self):
+    def test_static_check_does_not_block_local_use_before_assignment(self):
         result = validate_generated_code(
             "from typing import Any\n"
             "async def error_handler(update, context):\n"
@@ -156,10 +150,9 @@ class CodeToolsTests(unittest.TestCase):
             "    application: Any = object()\n"
             "    application.add_error_handler(error_handler)\n"
         )
-        self.assertFalse(result.ok)
-        self.assertIn("used before local assignment", result.error)
+        self.assertTrue(result.ok, result.error)
 
-    def test_static_check_rejects_awaiting_sync_function(self):
+    def test_static_check_does_not_block_awaiting_sync_function(self):
         result = validate_generated_code(
             "from typing import Any\n"
             "async def error_handler(update, context):\n"
@@ -174,10 +167,9 @@ class CodeToolsTests(unittest.TestCase):
             "    application: Any = object()\n"
             "    application.add_error_handler(error_handler)\n"
         )
-        self.assertFalse(result.ok)
-        self.assertIn("cannot await sync function", result.error)
+        self.assertTrue(result.ok, result.error)
 
-    def test_static_check_rejects_calling_non_callable_value(self):
+    def test_static_check_does_not_block_calling_non_callable_value(self):
         result = validate_generated_code(
             "from typing import Any\n"
             "async def error_handler(update, context):\n"
@@ -190,10 +182,9 @@ class CodeToolsTests(unittest.TestCase):
             "    label = 'Start'\n"
             "    label()\n"
         )
-        self.assertFalse(result.ok)
-        self.assertIn("not callable", result.error)
+        self.assertTrue(result.ok, result.error)
 
-    def test_static_check_rejects_asyncio_run_without_calling_main(self):
+    def test_static_check_does_not_block_asyncio_run_without_calling_main(self):
         result = validate_generated_code(
             "import asyncio\n"
             "from typing import Any\n"
@@ -206,35 +197,6 @@ class CodeToolsTests(unittest.TestCase):
             "if __name__ == '__main__':\n"
             "    asyncio.run(main)\n"
         )
-        self.assertFalse(result.ok)
-        self.assertIn("asyncio.run expected", result.error)
-
-    def test_mypy_static_check_rejects_obvious_type_error(self):
-        with patch("botmother.code_tools.subprocess.run") as run:
-            run.return_value = CompletedProcess(
-                args=[],
-                returncode=1,
-                stdout="bot.py:1: error: Incompatible types in assignment [assignment]\n",
-                stderr="",
-            )
-
-            result = run_mypy_static_check("value: int = 'bad'")
-
-        self.assertFalse(result.ok)
-        self.assertIn("Mypy static type check failed", result.error)
-        self.assertIn("Incompatible types", result.error)
-
-    def test_mypy_static_check_skips_when_mypy_is_not_installed(self):
-        with patch("botmother.code_tools.subprocess.run") as run:
-            run.return_value = CompletedProcess(
-                args=[],
-                returncode=1,
-                stdout="",
-                stderr="No module named mypy",
-            )
-
-            result = run_mypy_static_check("value: int = 'ok'")
-
         self.assertTrue(result.ok, result.error)
 
     def test_token_validation_and_masking(self):

@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .ai import (
-    AI_REFINEMENT_LAYERS,
     AIDecision,
     AIQuestion,
     AIReadinessDecision,
@@ -269,7 +268,6 @@ class BotService:
             prompt,
             token,
             raw,
-            coding_context=coding_brief,
             user_context=user_context,
         )
 
@@ -293,7 +291,6 @@ class BotService:
             token,
             raw_code,
             self._env_dict(decision),
-            coding_context=coding_brief,
             user_context=user_context,
         )
 
@@ -305,7 +302,6 @@ class BotService:
         token: str,
         raw_code: str,
         env_vars: dict[str, str] | None = None,
-        coding_context: str | None = None,
         user_context: str = "",
     ) -> OperationResult:
         token = token.strip()
@@ -353,11 +349,6 @@ class BotService:
                 "🔁 Token already attached\n\nThat token is already attached to another active bot.",
             )
 
-        raw_code = self._refine_code_for_deploy(
-            coding_context or prompt,
-            raw_code,
-            env_vars or {},
-        )
         code = extract_python_code(raw_code)
         validation = validate_generated_code(code)
         if not validation.ok:
@@ -520,20 +511,13 @@ class BotService:
             )
 
         env_vars = self._env_dict(decision)
-        existing_env_vars = self.db.get_bot_env_vars(bot_id)
-        refinement_env_vars = {**existing_env_vars, **env_vars}
         latest_revision = self.db.latest_revision(bot_id)
         current_code = str(latest_revision["code"]) if latest_revision is not None else ""
         generated_code = self.generator.edit_code(
             current_code,
             decision.code,
         )
-        raw_code = self._refine_code_for_deploy(
-            decision.code,
-            generated_code,
-            refinement_env_vars,
-        )
-        code = extract_python_code(raw_code)
+        code = extract_python_code(generated_code)
         validation = validate_generated_code(code)
         if not validation.ok:
             logger.warning(
@@ -981,66 +965,6 @@ class BotService:
             self.db.get_bot_env_vars(bot_id),
         )
 
-    def _refine_code_for_deploy(
-        self,
-        prompt: str,
-        raw_code: str,
-        env_vars: dict[str, str],
-        user_context: str = "",
-    ) -> str:
-        current = extract_python_code(raw_code)
-        validation = validate_generated_code(current)
-        if validation.ok:
-            logger.info("Skipping refinement; generated code already validates")
-            return current
-
-        last_valid = None
-        last_error = validation.error
-        env_names = sorted(env_vars)
-
-        for layer in range(1, AI_REFINEMENT_LAYERS + 1):
-            try:
-                candidate_raw = self.generator.refine_code_for_deploy(
-                    prompt,
-                    current,
-                    env_names,
-                    layer,
-                    AI_REFINEMENT_LAYERS,
-                    last_error,
-                    user_context=user_context,
-                )
-            except Exception as exc:
-                logger.exception(
-                    "AI refinement layer failed: layer=%s/%s",
-                    layer,
-                    AI_REFINEMENT_LAYERS,
-                )
-                last_error = str(exc)
-                continue
-
-            candidate = extract_python_code(candidate_raw)
-            candidate_validation = validate_generated_code(candidate)
-            current = candidate
-            if candidate_validation.ok:
-                last_valid = candidate
-                logger.info(
-                    "AI refinement layer accepted: layer=%s/%s code_chars=%s",
-                    layer,
-                    AI_REFINEMENT_LAYERS,
-                    len(candidate),
-                )
-                return last_valid
-
-            last_error = candidate_validation.error
-            logger.warning(
-                "AI refinement layer failed validation: layer=%s/%s error=%s",
-                layer,
-                AI_REFINEMENT_LAYERS,
-                last_error,
-            )
-
-        return last_valid or current
-
     async def _generate_validate_and_save(
         self, bot_id: int, prompt: str, user_context: str = ""
     ) -> OperationResult:
@@ -1049,11 +973,6 @@ class BotService:
         )
         coding_brief = self.generator.build_coding_brief(prompt, user_context=user_context)
         raw = self.generator.generate_code(coding_brief)
-        raw = self._refine_code_for_deploy(
-            coding_brief,
-            raw,
-            self.db.get_bot_env_vars(bot_id),
-        )
         code = extract_python_code(raw)
         validation = validate_generated_code(code)
         if not validation.ok:

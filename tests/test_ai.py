@@ -440,26 +440,6 @@ class AIDecisionTests(unittest.TestCase):
         self.assertIn("Do not ask for the Telegram token", call["user_prompt"])
         self.assertIn("English implementation prompt", call["user_prompt"])
 
-    def test_refine_code_for_deploy_returns_raw_python(self):
-        generator = make_generator(["print('refined')"])
-
-        code = generator.refine_code_for_deploy(
-            "make an echo bot",
-            "print('original')",
-            ["WEATHER_API_KEY"],
-            2,
-            3,
-            "old error",
-        )
-
-        self.assertEqual(code, "print('refined')")
-        call = generator.calls[0]
-        self.assertFalse(call["json_mode"])
-        self.assertIn("Layer 2/3", call["user_prompt"])
-        self.assertIn("WEATHER_API_KEY", call["user_prompt"])
-        self.assertIn("old error", call["user_prompt"])
-        self.assertNotIn("Requester context", call["user_prompt"])
-
 
 if __name__ == "__main__":
     unittest.main()
