@@ -5,6 +5,10 @@ import re
 from dataclasses import dataclass
 
 FENCE_RE = re.compile(r"```(?:python|py)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+DIFF_FENCE_RE = re.compile(r"```(?:diff|patch)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+HUNK_RE = re.compile(
+    r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$"
+)
 
 DENIED_IMPORT_ROOTS = {
     "ctypes",
@@ -40,6 +44,10 @@ class ValidationCheck:
     name: str
     ok: bool
     detail: str = ""
+
+
+class PatchApplyError(ValueError):
+    pass
 
 
 class DenylistVisitor(ast.NodeVisitor):
@@ -125,6 +133,122 @@ def extract_python_code(text: str) -> str:
             lines = lines[:-1]
         return "\n".join(lines).strip()
     return stripped
+
+
+def extract_unified_diff(text: str) -> str:
+    stripped = text.strip()
+    match = DIFF_FENCE_RE.search(stripped)
+    if match:
+        stripped = match.group(1).strip()
+    first_hunk = stripped.find("@@ ")
+    if first_hunk < 0:
+        raise PatchApplyError("AI did not return a unified diff.")
+    header = stripped.rfind("--- ", 0, first_hunk)
+    return stripped[header if header >= 0 else first_hunk :].strip()
+
+
+def apply_unified_diff(source: str, raw_diff: str) -> str:
+    """Apply one strict unified diff without accepting fuzzy context matches."""
+    diff = extract_unified_diff(raw_diff)
+    source_lines = source.splitlines()
+    diff_lines = diff.splitlines()
+    output: list[str] = []
+    source_index = 0
+    index = 0
+    saw_hunk = False
+
+    while index < len(diff_lines):
+        line = diff_lines[index]
+        if line.startswith(("--- ", "+++ ")):
+            index += 1
+            continue
+        match = HUNK_RE.match(line)
+        if match is None:
+            raise PatchApplyError(f"Invalid unified diff line: {line[:120]}")
+
+        saw_hunk = True
+        old_start = int(match.group(1))
+        old_count = int(match.group(2) or "1")
+        new_count = int(match.group(4) or "1")
+        target_index = max(0, old_start - 1)
+        if target_index < source_index or target_index > len(source_lines):
+            raise PatchApplyError("Patch hunk points outside the current source.")
+        output.extend(source_lines[source_index:target_index])
+        source_index = target_index
+        consumed = 0
+        produced = 0
+        index += 1
+
+        while index < len(diff_lines) and not diff_lines[index].startswith("@@ "):
+            patch_line = diff_lines[index]
+            if patch_line == r"\ No newline at end of file":
+                index += 1
+                continue
+            if not patch_line or patch_line[0] not in {" ", "+", "-"}:
+                raise PatchApplyError(
+                    f"Invalid patch operation: {patch_line[:120]}"
+                )
+            operation, content = patch_line[0], patch_line[1:]
+            if operation in {" ", "-"}:
+                if source_index >= len(source_lines) or source_lines[source_index] != content:
+                    raise PatchApplyError(
+                        f"Patch context does not match current source near line {source_index + 1}."
+                    )
+                if operation == " ":
+                    output.append(source_lines[source_index])
+                    produced += 1
+                source_index += 1
+                consumed += 1
+            else:
+                output.append(content)
+                produced += 1
+            index += 1
+
+        if consumed != old_count:
+            raise PatchApplyError(
+                f"Patch hunk expected {old_count} source lines but consumed {consumed}."
+            )
+        if produced != new_count:
+            raise PatchApplyError(
+                f"Patch hunk expected {new_count} output lines but produced {produced}."
+            )
+
+    if not saw_hunk:
+        raise PatchApplyError("Unified diff contains no hunks.")
+    output.extend(source_lines[source_index:])
+    trailing_newline = "\n" if source.endswith(("\n", "\r")) else ""
+    return "\n".join(output) + trailing_newline
+
+
+def repair_known_code_issues(code: str) -> tuple[str, tuple[str, ...]]:
+    repairs: list[str] = []
+    lines = code.splitlines()
+    output: list[str] = []
+    import_pattern = re.compile(r"^(\s*)from telegram import (.+)$")
+    for line in lines:
+        match = import_pattern.match(line)
+        if match is None or "(" in match.group(2):
+            output.append(line)
+            continue
+        names = [name.strip() for name in match.group(2).split(",")]
+        parse_mode_names = [
+            name for name in names if name.split(" as ", 1)[0].strip() == "ParseMode"
+        ]
+        if not parse_mode_names:
+            output.append(line)
+            continue
+        remaining = [name for name in names if name not in parse_mode_names]
+        indent = match.group(1)
+        if remaining:
+            output.append(f"{indent}from telegram import {', '.join(remaining)}")
+        output.append(
+            f"{indent}from telegram.constants import {', '.join(parse_mode_names)}"
+        )
+        repairs.append("Moved ParseMode import to telegram.constants.")
+    repaired = "\n".join(output)
+    if code.endswith(("\n", "\r")):
+        repaired += "\n"
+    return repaired, tuple(repairs)
 
 
 def validate_generated_code(code: str) -> ValidationResult:

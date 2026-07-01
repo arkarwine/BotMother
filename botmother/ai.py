@@ -1513,6 +1513,48 @@ class OpenRouterCodeGenerator:
         logger.error("OpenRouter returned an empty edit response")
         raise AIResponseError("OpenRouter returned an empty edit response.")
 
+    def patch_code_result(
+        self,
+        current_code: str,
+        edit_brief: str,
+        user_context: str = "",
+        on_delta: Callable[[str], None] | None = None,
+    ) -> AITextResult:
+        logger.info(
+            "Patching child bot code: model=%s code_chars=%s implementation_prompt_chars=%s",
+            self.coding_model,
+            len(current_code),
+            len(edit_brief),
+        )
+        prompt = (
+            "Modify the current bot with the smallest safe change that fully satisfies the edit brief.\n"
+            "Return one unified diff for bot.py only. Return no prose and no Markdown fences.\n"
+            "Use exact source context. Preserve all unrelated behavior, data, commands, buttons, and text.\n"
+            "The patch must leave one complete, standalone, deployment-ready Python Telegram bot.\n\n"
+            "Current bot.py:\n"
+            "```python\n"
+            f"{current_code.rstrip()}\n"
+            "```\n\n"
+            f"English edit implementation prompt:\n{edit_brief.strip()}"
+        )
+        if on_delta is not None:
+            result = self._chat_stream_result(
+                SYSTEM_PROMPT,
+                prompt,
+                model=self.coding_model,
+                on_delta=on_delta,
+            )
+        else:
+            result = self._chat_result(SYSTEM_PROMPT, prompt, model=self.coding_model)
+        if result.finished_by_token_limit:
+            raise AIResponseError(
+                "Code patching stopped because the model hit its token limit."
+            )
+        if result.text:
+            logger.info("OpenRouter returned code patch: chars=%s", len(result.text))
+            return result
+        raise AIResponseError("OpenRouter returned an empty code patch.")
+
     def answer_bot_question(self, bot_context: str, question: str) -> str:
         return self.answer_bot_question_result(bot_context, question).text
 

@@ -121,8 +121,8 @@ class ProcessManager:
         if bot is None:
             logger.error("Start failed; bot does not exist: bot_id=%s", bot_id)
             raise RunnerError(f"Bot {bot_id} does not exist.")
-        revision = self.db.latest_revision(bot_id)
-        if revision is None or revision["validation_status"] != "ok":
+        revision = self.db.latest_valid_revision(bot_id)
+        if revision is None:
             logger.error("Start failed; no valid revision: bot_id=%s", bot_id)
             raise RunnerError(f"Bot {bot_id} has no valid revision.")
 

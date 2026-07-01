@@ -56,6 +56,19 @@ class FakeRunner:
         self.active.pop(bot_id, None)
 
 
+class FailOnceRunner(FakeRunner):
+    def __init__(self):
+        super().__init__()
+        self.fail_next_start = True
+
+    async def start_bot(self, bot_id: int) -> None:
+        self.start_count += 1
+        if self.fail_next_start:
+            self.fail_next_start = False
+            raise RuntimeError("new revision crashed")
+        self.active[bot_id] = object()
+
+
 class FakeGenerator:
     def __init__(self, edited_code: str, env=None, answer: str = "It echoes messages."):
         self.edited_code = edited_code
@@ -138,6 +151,28 @@ class SlowCodeGenerator(FakeGenerator):
         return super().generate_code(prompt, user_context=user_context)
 
 
+class PatchGenerator(FakeGenerator):
+    def __init__(self, patch: str, fallback_code: str = NEW_BOT_CODE):
+        super().__init__(fallback_code)
+        self.patch = patch
+        self.patch_calls = 0
+        self.full_edit_calls = 0
+
+    def patch_code_result(self, current_code: str, edit_prompt: str, on_delta=None):
+        from botmother.ai import AITextResult
+
+        self.patch_calls += 1
+        self.current_code = current_code
+        self.edit_code_prompt = edit_prompt
+        if on_delta is not None:
+            on_delta(self.patch)
+        return AITextResult(self.patch)
+
+    def edit_code(self, current_code: str, edit_prompt: str, user_context: str = ""):
+        self.full_edit_calls += 1
+        return super().edit_code(current_code, edit_prompt, user_context=user_context)
+
+
 def make_settings(tmp: str) -> Settings:
     return Settings(
         mother_bot_token="11111:mother_token_abcdefghijklmnopqrstuvwxyz",
@@ -175,6 +210,64 @@ def make_service(tmp: str, edited_code: str = NEW_BOT_CODE, env=None):
 
 
 class ServiceEditTests(unittest.TestCase):
+    def test_prompt_edit_applies_small_patch_without_full_regeneration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, db, runner, _, bot_id = make_service(tmp)
+            patch = (
+                "--- a/bot.py\n"
+                "+++ b/bot.py\n"
+                "@@ -13 +13 @@\n"
+                "-VALUE = 'old'\n"
+                "+VALUE = 'new'"
+            )
+            generator = PatchGenerator(patch)
+            service.generator = generator
+            runner.active[bot_id] = object()
+
+            result = asyncio.run(
+                service.edit_bot_with_prompt(1, bot_id, "change the value")
+            )
+
+            self.assertTrue(result.ok, result.message)
+            self.assertEqual(generator.patch_calls, 1)
+            self.assertEqual(generator.full_edit_calls, 0)
+            self.assertEqual(db.latest_revision(bot_id)["code"], NEW_BOT_CODE)
+
+    def test_prompt_edit_falls_back_when_patch_context_is_invalid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, db, _, _, bot_id = make_service(tmp)
+            generator = PatchGenerator(
+                "@@ -1 +1 @@\n-not the current line\n+replacement"
+            )
+            service.generator = generator
+
+            result = asyncio.run(
+                service.edit_bot_with_prompt(1, bot_id, "change the value")
+            )
+
+            self.assertTrue(result.ok, result.message)
+            self.assertEqual(generator.patch_calls, 2)
+            self.assertEqual(generator.full_edit_calls, 1)
+            self.assertEqual(db.latest_revision(bot_id)["code"], NEW_BOT_CODE.strip())
+
+    def test_failed_edit_launch_restores_previous_valid_revision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, db, _, generator, bot_id = make_service(tmp)
+            runner = FailOnceRunner()
+            runner.active[bot_id] = object()
+            service.runner = runner
+
+            result = asyncio.run(
+                service.edit_bot_with_prompt(1, bot_id, "make it friendlier")
+            )
+
+            self.assertFalse(result.ok)
+            self.assertIn("restored", result.message)
+            self.assertEqual(db.latest_revision(bot_id)["validation_status"], "launch_failed")
+            self.assertEqual(db.latest_valid_revision(bot_id)["code"], OLD_BOT_CODE)
+            self.assertIn(bot_id, runner.active)
+            self.assertEqual(runner.start_count, 2)
+
     def test_create_bot_code_generation_times_out_without_saving_bot(self):
         with tempfile.TemporaryDirectory() as tmp:
             settings = replace(

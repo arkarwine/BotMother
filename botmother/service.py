@@ -16,7 +16,10 @@ from .ai import (
     OpenRouterCodeGenerator,
 )
 from .code_tools import (
+    PatchApplyError,
+    apply_unified_diff,
     extract_python_code,
+    repair_known_code_issues,
     validate_generated_code,
     validate_generated_code_report,
 )
@@ -268,7 +271,7 @@ class BotService:
             return OperationResult(
                 False, "Bot not found, or you do not have access.", bot_id
             )
-        existing_revision = self.db.latest_revision(bot_id)
+        existing_revision = self.db.latest_valid_revision(bot_id)
         if existing_revision is None or not existing_revision["code"]:
             return OperationResult(
                 False, "This bot has no saved source to edit.", bot_id
@@ -479,7 +482,12 @@ class BotService:
         )
 
     async def revise_bot(
-        self, user_id: int, bot_id: int, prompt: str, user_context: str = ""
+        self,
+        user_id: int,
+        bot_id: int,
+        prompt: str,
+        user_context: str = "",
+        on_delta: Callable[[str], None] | None = None,
     ) -> OperationResult:
         if not self.can_manage(user_id, bot_id):
             logger.info("Denied revise: user_id=%s bot_id=%s", user_id, bot_id)
@@ -493,46 +501,109 @@ class BotService:
         reservation_id = gate.reservation_id
 
         was_running = bot_id in self.runner.active
+        bot_before = self.db.get_bot(bot_id)
+        previous_prompt = str(bot_before["prompt"]) if bot_before is not None else ""
         logger.info(
             "Revising bot: bot_id=%s user_id=%s was_running=%s",
             bot_id,
             user_id,
             was_running,
         )
+        revision = self.db.latest_valid_revision(bot_id)
+        if revision is None or not revision["code"]:
+            self.refund_paid_action(reservation_id, "Revision did not produce valid code")
+            return OperationResult(False, "This bot has no saved source to revise.", bot_id)
+        try:
+            coding_brief = await asyncio.to_thread(
+                self.generator.build_coding_brief,
+                prompt,
+                user_context=user_context,
+            )
+            edit_brief = (
+                "Revise the existing bot so it fully satisfies this complete updated specification. "
+                "Preserve existing behavior that does not conflict with it.\n\n"
+                f"Updated specification:\n{coding_brief}"
+            )
+            code, generated, edit_mode = await self._generate_edited_source(
+                str(revision["code"]), edit_brief, on_delta
+            )
+        except (AIResponseError, RuntimeError) as exc:
+            self.refund_paid_action(reservation_id, "Revision generation failed")
+            logger.warning("Bot revision generation failed: bot_id=%s error=%s", bot_id, exc)
+            return OperationResult(False, f"⚠️ Revision stopped\n\n{exc}", bot_id)
+
+        validation = validate_generated_code(code)
+        if not validation.ok:
+            self.db.add_revision(bot_id, f"Revise: {prompt}", code, "failed", validation.error)
+            self.refund_paid_action(reservation_id, "Revision did not produce valid code")
+            return OperationResult(
+                False,
+                f"⚠️ Revision rejected\n\n{validation.error}\n\nThe running bot was left unchanged.",
+                bot_id,
+                generated.usage,
+            )
+
+        logger.info(
+            "Applying revision: bot_id=%s mode=%s code_chars=%s",
+            bot_id,
+            edit_mode,
+            len(code),
+        )
         if was_running:
             await self.runner.stop_bot(bot_id, mark_stopped=False)
-        self.db.update_bot_status(bot_id, "generating")
-        self.db.update_bot_prompt(bot_id, prompt)
-
-        result = await self._generate_validate_and_save(
-            bot_id, prompt, user_context=user_context
+        revision_id = self.db.add_revision(
+            bot_id, f"Revise: {prompt}", code, "ok", None
         )
-        if not result.ok:
-            self.refund_paid_action(reservation_id, "Revision did not produce valid code")
-            logger.warning(
-                "Bot revision rejected: bot_id=%s message=%s", bot_id, result.message
-            )
-            return result
+        self.db.update_bot_prompt(bot_id, prompt)
+        self.db.update_bot_status(bot_id, "ready")
 
         try:
             await self.runner.start_bot(bot_id)
         except Exception as exc:
             logger.exception("Launch failed after revise: bot_id=%s", bot_id)
-            self.db.update_bot_status(bot_id, "launch_failed")
+            self.db.update_revision_validation(revision_id, "launch_failed", str(exc))
+            self.db.update_bot_prompt(bot_id, previous_prompt)
             self.db.add_log(
                 bot_id,
                 "system",
                 f"Launch failed after revise: {exc}",
                 self.settings.log_tail_rows,
             )
+            rolled_back = False
+            if was_running:
+                try:
+                    await self.runner.start_bot(bot_id)
+                    rolled_back = True
+                    self.db.add_log(
+                        bot_id,
+                        "system",
+                        "Restored previous validated revision after failed revision launch.",
+                        self.settings.log_tail_rows,
+                    )
+                except Exception as rollback_exc:
+                    logger.exception("Revision rollback failed: bot_id=%s", bot_id)
+                    self.db.update_bot_status(bot_id, "launch_failed")
+                    self.db.add_log(
+                        bot_id,
+                        "system",
+                        f"Revision rollback failed: {rollback_exc}",
+                        self.settings.log_tail_rows,
+                    )
+            if not rolled_back:
+                self.db.update_bot_status(bot_id, "launch_failed")
             self.settle_paid_action(reservation_id, bot_id=bot_id, note="Revision saved; launch failed")
             bot = self.db.get_bot(bot_id)
             name = bot["name"] if bot is not None else "The bot"
+            rollback_text = (
+                "The previous working revision was restored."
+                if rolled_back
+                else "The previous revision could not be restored automatically."
+            )
             return OperationResult(
                 False,
-                f"⚠️ Revision saved, launch failed\n\n{name} was revised, but it could not start.\n\nError: {exc}\n\nOpen Logs for details.",
+                f"⚠️ Revision launch failed\n\n{name} could not start the new revision. {rollback_text}\n\nError: {exc}\n\nOpen Logs for details.",
                 bot_id,
-                result.ai_usage,
+                generated.usage,
             )
 
         logger.info("Bot revised and running: bot_id=%s user_id=%s", bot_id, user_id)
@@ -543,7 +614,7 @@ class BotService:
             True,
             f"✅ {name} revised and running\n\nUse the keyboard to view logs, status, or ask what changed.",
             bot_id,
-            result.ai_usage,
+            generated.usage,
         )
 
     async def edit_bot_with_prompt(
@@ -575,12 +646,10 @@ class BotService:
             )
 
         env_vars = self._env_dict(decision)
-        latest_revision = self.db.latest_revision(bot_id)
+        latest_revision = self.db.latest_valid_revision(bot_id)
         current_code = str(latest_revision["code"]) if latest_revision is not None else ""
         try:
-            generated = await self._run_coding_thread(
-                "Code editing",
-                self._edit_code_result,
+            code, generated, edit_mode = await self._generate_edited_source(
                 current_code,
                 decision.code,
                 on_delta,
@@ -592,8 +661,6 @@ class BotService:
                 f"⚠️ Edit stopped\n\n{exc}",
                 bot_id,
             )
-        generated_code = generated.text
-        code = extract_python_code(generated_code)
         validation = validate_generated_code(code)
         if not validation.ok:
             logger.warning(
@@ -613,15 +680,17 @@ class BotService:
 
         was_running = bot_id in self.runner.active
         logger.info(
-            "Applying prompt edit: bot_id=%s user_id=%s was_running=%s code_chars=%s",
+            "Applying prompt edit: bot_id=%s user_id=%s mode=%s was_running=%s code_chars=%s",
             bot_id,
             user_id,
+            edit_mode,
             was_running,
             len(code),
         )
         if was_running:
             await self.runner.stop_bot(bot_id, mark_stopped=False)
 
+        previous_env_vars = self.db.get_bot_env_vars(bot_id)
         if env_vars:
             self.db.set_bot_env_vars(bot_id, env_vars)
             logger.info(
@@ -629,24 +698,55 @@ class BotService:
                 bot_id,
                 len(env_vars),
             )
-        self.db.add_revision(bot_id, f"Edit: {edit_prompt}", code, "ok", None)
+        revision_id = self.db.add_revision(
+            bot_id, f"Edit: {edit_prompt}", code, "ok", None
+        )
         self.db.update_bot_status(bot_id, "ready")
         try:
             await self.runner.start_bot(bot_id)
         except Exception as exc:
             logger.exception("Launch failed after prompt edit: bot_id=%s", bot_id)
-            self.db.update_bot_status(bot_id, "launch_failed")
+            self.db.update_revision_validation(revision_id, "launch_failed", str(exc))
+            if env_vars:
+                self.db.replace_bot_env_vars(bot_id, previous_env_vars)
             self.db.add_log(
                 bot_id,
                 "system",
                 f"Launch failed after prompt edit: {exc}",
                 self.settings.log_tail_rows,
             )
+            rolled_back = False
+            if was_running:
+                try:
+                    await self.runner.start_bot(bot_id)
+                    rolled_back = True
+                    self.db.add_log(
+                        bot_id,
+                        "system",
+                        "Restored previous validated revision after failed edit launch.",
+                        self.settings.log_tail_rows,
+                    )
+                except Exception as rollback_exc:
+                    logger.exception("Edit rollback failed: bot_id=%s", bot_id)
+                    self.db.update_bot_status(bot_id, "launch_failed")
+                    self.db.add_log(
+                        bot_id,
+                        "system",
+                        f"Edit rollback failed: {rollback_exc}",
+                        self.settings.log_tail_rows,
+                    )
+            if not rolled_back:
+                self.db.update_bot_status(bot_id, "launch_failed")
             bot = self.db.get_bot(bot_id)
             name = bot["name"] if bot is not None else "The bot"
+            rollback_text = (
+                "The previous working revision was restored."
+                if rolled_back
+                else "The previous revision could not be restored automatically."
+            )
             return OperationResult(
                 False,
-                f"⚠️ Edit saved, launch failed\n\n{name} was edited, but it could not start.\n\nError: {exc}\n\nOpen Logs for details.",
+                f"⚠️ Edit launch failed\n\n{name} could not start the new edit. {rollback_text}\n\nError: {exc}\n\nOpen Logs for details.",
                 bot_id,
                 generated.usage,
             )
@@ -1031,6 +1131,105 @@ class BotService:
         if code and on_delta is not None:
             on_delta(code)
         return AITextResult(code)
+
+    def _patch_code_result(
+        self,
+        current_code: str,
+        edit_brief: str,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> AITextResult:
+        patch_result = getattr(self.generator, "patch_code_result", None)
+        if not callable(patch_result):
+            raise AIResponseError("The configured generator does not support patch editing.")
+        try:
+            return patch_result(current_code, edit_brief, on_delta=on_delta)
+        except TypeError:
+            result = patch_result(current_code, edit_brief)
+            if result.text and on_delta is not None:
+                on_delta(result.text)
+            return result
+
+    async def _generate_edited_source(
+        self,
+        current_code: str,
+        edit_brief: str,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> tuple[str, AITextResult, str]:
+        repaired_code, deterministic_repairs = repair_known_code_issues(current_code)
+        if deterministic_repairs:
+            logger.info(
+                "Applied deterministic compatibility repairs before AI edit: repairs=%s",
+                deterministic_repairs,
+            )
+
+        if callable(getattr(self.generator, "patch_code_result", None)):
+            try:
+                patch_result = await self._run_coding_thread(
+                    "Code patching",
+                    self._patch_code_result,
+                    repaired_code,
+                    edit_brief,
+                    on_delta,
+                )
+                patched_code = apply_unified_diff(repaired_code, patch_result.text)
+                patch_validation = validate_generated_code(patched_code)
+                if patch_validation.ok:
+                    return patched_code, patch_result, "patch"
+                raise PatchApplyError(
+                    patch_validation.error or "Patched code failed validation."
+                )
+            except PatchApplyError as exc:
+                logger.warning("Initial patch rejected; requesting one repair: %s", exc)
+                repair_brief = (
+                    f"{edit_brief}\n\n"
+                    "The previous unified diff could not be applied or validated. "
+                    "Return a corrected minimal unified diff against the original current source.\n"
+                    f"Patch error: {exc}\n\n"
+                    f"Rejected patch:\n{patch_result.text}"
+                )
+                try:
+                    if on_delta is not None:
+                        on_delta("\n\n# Correcting the patch...\n")
+                    repaired_patch = await self._run_coding_thread(
+                        "Code patch repair",
+                        self._patch_code_result,
+                        repaired_code,
+                        repair_brief,
+                        on_delta,
+                    )
+                    patched_code = apply_unified_diff(
+                        repaired_code, repaired_patch.text
+                    )
+                    repaired_validation = validate_generated_code(patched_code)
+                    if not repaired_validation.ok:
+                        raise PatchApplyError(
+                            repaired_validation.error
+                            or "Repaired patch failed validation."
+                        )
+                    return patched_code, repaired_patch, "repaired patch"
+                except (AIResponseError, PatchApplyError) as repair_exc:
+                    logger.warning(
+                        "Patch repair failed; falling back to complete source: %s",
+                        repair_exc,
+                    )
+            except AIResponseError as exc:
+                logger.warning(
+                    "Patch edit failed; falling back to complete source: %s", exc
+                )
+
+            if on_delta is not None:
+                on_delta(
+                    "\n\n# Patch could not be applied safely; generating a complete replacement.\n"
+                )
+
+        generated = await self._run_coding_thread(
+            "Code editing",
+            self._edit_code_result,
+            repaired_code,
+            edit_brief,
+            on_delta,
+        )
+        return extract_python_code(generated.text), generated, "replacement"
 
     def _answer_bot_question_result(
         self,

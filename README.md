@@ -80,6 +80,8 @@ PYTHON_BIN=/home/ubuntu/BotMother/.venv/bin/python
 
 Child bots may use stdlib, `sqlite3`, and `python-telegram-bot`. BotMother checks that the configured child Python can import `telegram` before launch. If it cannot, the bot is marked `dependency_missing` and the logs show the exact interpreter that needs `pip install -r requirements.txt`.
 
+Edits, revisions, and Auto Fix use a patch-first pipeline. The coding model returns a minimal unified diff against the saved source; BotMother applies it only when every context line matches and the resulting source passes validation. An invalid patch gets one focused repair attempt before BotMother falls back to complete-source generation. Known compatibility fixes, such as the `ParseMode` import location, are applied deterministically before AI editing. The running bot is not stopped until replacement source has validated, and a launch failure restores the previous validated revision when the bot was already running.
+
 ## Telegram Controls
 
 BotMother is designed as a tap-first manager. `/start` removes the old persistent reply keyboard and opens an inline home menu. Bot lists, bot details, confirmations, help categories, and setup results use inline buttons so users normally do not need to type bot IDs.

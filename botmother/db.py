@@ -326,6 +326,34 @@ class Database:
                 (bot_id,),
             ).fetchone()
 
+    def latest_valid_revision(self, bot_id: int) -> sqlite3.Row | None:
+        with self.session() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM revisions
+                WHERE bot_id = ? AND validation_status = 'ok'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (bot_id,),
+            ).fetchone()
+
+    def update_revision_validation(
+        self,
+        revision_id: int,
+        status: str,
+        error: str | None,
+    ) -> None:
+        with self.session() as conn:
+            conn.execute(
+                """
+                UPDATE revisions
+                SET validation_status = ?, validation_error = ?
+                WHERE id = ?
+                """,
+                (status, error, revision_id),
+            )
+
     def count_revisions(self, bot_id: int) -> int:
         with self.session() as conn:
             row = conn.execute(
@@ -348,6 +376,11 @@ class Database:
                     """,
                     (bot_id, name, value, now, now),
                 )
+
+    def replace_bot_env_vars(self, bot_id: int, env_vars: dict[str, str]) -> None:
+        with self.session() as conn:
+            conn.execute("DELETE FROM bot_env_vars WHERE bot_id = ?", (bot_id,))
+        self.set_bot_env_vars(bot_id, env_vars)
 
     def get_bot_env_vars(self, bot_id: int) -> dict[str, str]:
         with self.session() as conn:

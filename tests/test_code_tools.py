@@ -1,7 +1,10 @@
 import unittest
 
 from botmother.code_tools import (
+    PatchApplyError,
+    apply_unified_diff,
     extract_python_code,
+    repair_known_code_issues,
     validate_generated_code,
     validate_generated_code_report,
 )
@@ -9,6 +12,43 @@ from botmother.tokens import is_valid_telegram_token, mask_token
 
 
 class CodeToolsTests(unittest.TestCase):
+    def test_apply_unified_diff_changes_only_requested_lines(self):
+        source = "alpha\nbeta\ngamma\n"
+        diff = (
+            "--- a/bot.py\n"
+            "+++ b/bot.py\n"
+            "@@ -1,3 +1,4 @@\n"
+            " alpha\n"
+            "-beta\n"
+            "+better\n"
+            "+extra\n"
+            " gamma"
+        )
+
+        self.assertEqual(
+            apply_unified_diff(source, diff),
+            "alpha\nbetter\nextra\ngamma\n",
+        )
+
+    def test_apply_unified_diff_rejects_mismatched_context(self):
+        with self.assertRaises(PatchApplyError):
+            apply_unified_diff(
+                "alpha\nbeta\n",
+                "@@ -1,2 +1,2 @@\n wrong\n-beta\n+better",
+            )
+
+    def test_known_repair_moves_parse_mode_import(self):
+        repaired, changes = repair_known_code_issues(
+            "from telegram import Update, ParseMode, Bot\n"
+        )
+
+        self.assertEqual(
+            repaired,
+            "from telegram import Update, Bot\n"
+            "from telegram.constants import ParseMode\n",
+        )
+        self.assertTrue(changes)
+
     def test_extract_python_code_from_fence(self):
         raw = "```python\nprint('hello')\n```"
         self.assertEqual(extract_python_code(raw), "print('hello')")

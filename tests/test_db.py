@@ -27,6 +27,10 @@ class DatabaseTests(unittest.TestCase):
             self.assertIsNotNone(bot)
             self.assertEqual(bot["status"], "running")
             self.assertEqual(db.latest_revision(bot_id)["code"], "print('ok')")
+            self.assertEqual(db.latest_valid_revision(bot_id)["code"], "print('ok')")
+            db.add_revision(bot_id, "bad", "def nope(:", "failed", "syntax")
+            self.assertEqual(db.latest_revision(bot_id)["validation_status"], "failed")
+            self.assertEqual(db.latest_valid_revision(bot_id)["code"], "print('ok')")
             self.assertEqual(db.get_logs(bot_id)[0]["line"], "hello")
             self.assertEqual(
                 db.get_bot_by_token("12345:abcdefghijklmnopqrstuvwxyzABCDE")["id"],

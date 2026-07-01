@@ -1260,15 +1260,20 @@ def build_application(token: str, db: Database, service: BotService):
         loop = asyncio.get_running_loop()
         started = loop.time()
         task = asyncio.create_task(awaitable)
-        last_update = 0.0
+        last_progress_update = started
+        last_draft_update = started
         received_chars = 0
         streamed_parts: list[str] = []
-        last_rendered = ""
+        last_progress_rendered = ""
+        last_draft_rendered = ""
         draft_interval = 3.0 if stream_mode == "code_tail" else 0.5
         draft_id = new_stream_draft_id(context)
         while not task.done() or (stream_queue is not None and not stream_queue.empty()):
             if stream_queue is None:
-                await asyncio.sleep(interval_seconds)
+                await asyncio.wait(
+                    {task},
+                    timeout=min(1.0, max(0.1, interval_seconds)),
+                )
             else:
                 try:
                     delta = await asyncio.wait_for(stream_queue.get(), timeout=0.8)
@@ -1280,17 +1285,27 @@ def build_application(token: str, db: Database, service: BotService):
             if task.done() and (stream_queue is None or stream_queue.empty()):
                 break
             now = loop.time()
-            update_interval = (
-                draft_interval
-                if stream_visible_text and received_chars
-                else interval_seconds
-            )
-            if now - last_update < update_interval:
-                continue
             elapsed = int(loop.time() - started)
             raw_stream = "".join(streamed_parts)
             visible_preview = raw_stream.strip() if stream_visible_text else ""
-            if visible_preview:
+            if now - last_progress_update >= interval_seconds:
+                progress_rendered = progress_text(
+                    update,
+                    tr(update, title_key),
+                    tr(update, detail_key),
+                    elapsed,
+                    max_tokens=max_tokens,
+                    received_chars=received_chars,
+                )
+                if progress_rendered != last_progress_rendered:
+                    await edit_message_html(progress_message, progress_rendered)
+                    last_progress_rendered = progress_rendered
+                last_progress_update = now
+
+            if (
+                visible_preview
+                and now - last_draft_update >= draft_interval
+            ):
                 if stream_mode == "code_tail":
                     rendered = code_tail_draft_text(
                         update,
@@ -1305,7 +1320,7 @@ def build_application(token: str, db: Database, service: BotService):
                         visible_preview,
                         max_tokens=max_tokens,
                     )
-                if rendered != last_rendered:
+                if rendered != last_draft_rendered:
                     if stream_mode == "code_tail":
                         await send_plain_draft(
                             update,
@@ -1318,20 +1333,8 @@ def build_application(token: str, db: Database, service: BotService):
                         await send_plain_draft(
                             update, context, rendered, draft_id=draft_id
                         )
-                    last_rendered = rendered
-            else:
-                rendered = progress_text(
-                    update,
-                    tr(update, title_key),
-                    tr(update, detail_key),
-                    elapsed,
-                    max_tokens=max_tokens,
-                    received_chars=received_chars,
-                )
-                if stream_queue is None and rendered != last_rendered:
-                    await edit_message_html(progress_message, rendered)
-                    last_rendered = rendered
-            last_update = now
+                    last_draft_rendered = rendered
+                last_draft_update = now
         if stream_visible_text and streamed_parts:
             if stream_mode == "code_tail":
                 rendered = code_tail_draft_text(
@@ -1347,7 +1350,7 @@ def build_application(token: str, db: Database, service: BotService):
                     "".join(streamed_parts).strip(),
                     max_tokens=max_tokens,
                 )
-            if rendered != last_rendered:
+            if rendered != last_draft_rendered:
                 if stream_mode == "code_tail":
                     await send_plain_draft(
                         update,
