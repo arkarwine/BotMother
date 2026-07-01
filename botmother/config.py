@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import os
 import shlex
+import sys
 
 
 def load_env_file(path: str | Path = ".env") -> None:
@@ -143,7 +144,7 @@ class Settings:
             db_path=_path_from_env(os.getenv("BOTMOTHER_DB", "./data/botmother.sqlite3"), base_dir),
             workdir=_path_from_env(os.getenv("BOTMOTHER_WORKDIR", "./data/bots"), base_dir),
             owner_ids=_owner_ids(os.getenv("OWNER_IDS")),
-            python_bin=os.getenv("PYTHON_BIN", "python3").strip() or "python3",
+            python_bin=os.getenv("PYTHON_BIN", "").strip() or sys.executable,
             openrouter_interaction_max_tokens=int(
                 os.getenv("OPENROUTER_INTERACTION_MAX_TOKENS", "6000")
             ),

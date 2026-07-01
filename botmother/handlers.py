@@ -40,6 +40,7 @@ STATUS_EMOJI = {
     "launch_failed": "🔴",
     "restart_failed": "🔴",
     "python_missing": "🔴",
+    "dependency_missing": "🔴",
     "deleted": "🗑️",
     "generating": "🧠",
 }

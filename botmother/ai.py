@@ -52,6 +52,7 @@ UX/code requirements:
 - Avoid making users type IDs/options when buttons can represent choices.
 - Create required SQLite tables in BOT_DB_PATH.
 - Add application.add_error_handler(...) that logs exceptions and sends a friendly fallback when possible.
+- Import ParseMode with `from telegram.constants import ParseMode`; do not import ParseMode from telegram.
 - Prefer ParseMode.HTML plus html.escape for dynamic text; if using MarkdownV2, escape all dynamic text. No legacy Markdown or unescaped user content.
 - Language: follow the English implementation prompt exactly. If it says BotMother locale is "my", write child bot user-facing text in Myanmar/Burmese. If it says "en", write English. If it requests another language or multilingual support, follow the prompt.
 

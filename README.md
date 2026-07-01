@@ -56,7 +56,7 @@ OPENROUTER_CODING_TIMEOUT_SECONDS=360
 BOTMOTHER_DB=./data/botmother.sqlite3
 BOTMOTHER_WORKDIR=./data/bots
 OWNER_IDS=123456789
-PYTHON_BIN=python3
+PYTHON_BIN=
 BOTMOTHER_LOG_LEVEL=INFO
 BOTMOTHER_LOG_FILE=./data/botmother.log
 CREDITS_ENABLED=true
@@ -70,13 +70,15 @@ CREDIT_RUNTIME_SECONDS_PER_CREDIT=86400
 CREDIT_RUNTIME_METER_INTERVAL_SECONDS=300
 ```
 
-For Ubuntu deployment, the simplest setting is the absolute venv interpreter path:
+For Ubuntu deployment, leave `PYTHON_BIN` empty to run child bots with the same Python interpreter that runs BotMother. If you want to be explicit, set it to the absolute venv interpreter path:
 
 ```env
 PYTHON_BIN=/home/ubuntu/BotMother/.venv/bin/python
 ```
 
 `PYTHON_BIN=/home/ubuntu/BotMother/.venv/bin/python3` also works when that file exists. Check with `ls -l .venv/bin/python*`. If `PYTHON_BIN=python3`, install the Python dependencies into the system Python environment used to launch child bots.
+
+Child bots may use stdlib, `sqlite3`, and `python-telegram-bot`. BotMother checks that the configured child Python can import `telegram` before launch. If it cannot, the bot is marked `dependency_missing` and the logs show the exact interpreter that needs `pip install -r requirements.txt`.
 
 ## Telegram Controls
 

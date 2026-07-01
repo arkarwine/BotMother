@@ -83,6 +83,14 @@ class CodeToolsTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("legacy", result.error)
 
+    def test_validate_rejects_parse_mode_import_from_telegram_root(self):
+        result = validate_generated_code(
+            "from telegram import Update, ParseMode\n"
+            "print(ParseMode.HTML)\n"
+        )
+        self.assertFalse(result.ok)
+        self.assertIn("telegram.constants", result.error)
+
     def test_validate_does_not_require_command_menu_registration(self):
         result = validate_generated_code(
             "from typing import Any\n"

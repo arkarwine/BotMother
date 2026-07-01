@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 MAX_UNEXPECTED_SIGNAL_RESTARTS = 2
 UNEXPECTED_SIGNAL_RESTART_DELAY_SECONDS = 2
 SIGNAL_EXIT_STATUS_GRACE_SECONDS = 1.0
+REQUIRED_CHILD_IMPORTS = ("telegram",)
 
 
 class RunnerError(RuntimeError):
@@ -69,7 +70,32 @@ class ProcessManager:
         return shutil.which(python_bin) is not None
 
     def build_plain_command(self) -> list[str]:
-        return [self.settings.python_bin, "bot.py"]
+        return [self._resolve_python_bin(), "bot.py"]
+
+    def dependency_error_message(self, python_bin: str, missing: list[str]) -> str:
+        packages = ", ".join(missing)
+        return (
+            f"Child Python dependency check failed for '{python_bin}'. "
+            f"Missing import(s): {packages}.\n\n"
+            "Fix: set PYTHON_BIN to the same virtualenv Python that runs BotMother, "
+            "for example /home/ubuntu/BotMother/.venv/bin/python, then restart BotMother.\n"
+            f"Or install dependencies into that interpreter:\n{python_bin} -m pip install -r requirements.txt"
+        )
+
+    async def _missing_child_imports(self, python_bin: str) -> list[str]:
+        missing: list[str] = []
+        for module in REQUIRED_CHILD_IMPORTS:
+            process = await asyncio.create_subprocess_exec(
+                python_bin,
+                "-c",
+                f"import {module}",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            return_code = await process.wait()
+            if return_code != 0:
+                missing.append(module)
+        return missing
 
     def _child_env(self, token: str, bot_db_path: str, extra_env: dict[str, str] | None = None) -> dict[str, str]:
         env = {
@@ -105,12 +131,19 @@ class ProcessManager:
         (bot_dir / "bot.py").write_text(revision["code"], encoding="utf-8")
         child_db = bot_dir / "bot.sqlite3"
         extra_env = self.db.get_bot_env_vars(bot_id)
-        if not self._host_python_exists(self._resolve_python_bin()):
+        python_bin = self._resolve_python_bin()
+        if not self._host_python_exists(python_bin):
             self.db.update_bot_status(bot_id, "python_missing")
             raise RunnerError(
                 f"Python executable '{self.settings.python_bin}' was not found. "
                 "Set PYTHON_BIN to an existing interpreter, for example .venv/bin/python."
             )
+        missing_imports = await self._missing_child_imports(python_bin)
+        if missing_imports:
+            self.db.update_bot_status(bot_id, "dependency_missing")
+            message = self.dependency_error_message(python_bin, missing_imports)
+            self.db.add_log(bot_id, "system", message, self.settings.log_tail_rows)
+            raise RunnerError(message)
         env = self._child_env(bot["token"], str(child_db), extra_env)
         command = self.build_plain_command()
         cwd = str(bot_dir)

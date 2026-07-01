@@ -10,6 +10,7 @@ from botmother.runner import (
     MAX_UNEXPECTED_SIGNAL_RESTARTS,
     ProcessManager,
     ProcessRecord,
+    RunnerError,
     format_return_code,
     is_signal_exit,
 )
@@ -181,6 +182,10 @@ class RunnerTests(unittest.TestCase):
                 manager = ProcessManager(settings, db)
 
                 manager._host_python_exists = lambda python_bin: True
+                async def no_missing_imports(python_bin: str):
+                    return []
+
+                manager._missing_child_imports = no_missing_imports
                 with patch(
                     "asyncio.create_subprocess_exec",
                     return_value=FakeLaunchProcess(),
@@ -192,6 +197,43 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(
                     mocked.call_args.kwargs["env"]["BOT_DB_PATH"],
                     str(bot_dir / "bot.sqlite3"),
+                )
+
+        asyncio.run(run_case())
+
+    def test_start_bot_reports_missing_child_dependency_before_launch(self):
+        async def run_case():
+            with tempfile.TemporaryDirectory() as tmp:
+                settings = make_settings(tmp)
+                db = Database(settings.db_path)
+                db.initialize()
+                db.upsert_user(1, "owner", None, None)
+                bot_dir = settings.workdir / "1"
+                bot_id = db.create_bot(
+                    1,
+                    100,
+                    "Echo",
+                    "make echo",
+                    "12345:abcdefghijklmnopqrstuvwxyzABCDE",
+                    bot_dir,
+                )
+                db.add_revision(bot_id, "make echo", "print('ok')", "ok", None)
+                manager = ProcessManager(settings, db)
+
+                manager._host_python_exists = lambda python_bin: True
+                async def missing_imports(python_bin: str):
+                    return ["telegram"]
+
+                manager._missing_child_imports = missing_imports
+                with patch("asyncio.create_subprocess_exec") as mocked:
+                    with self.assertRaises(RunnerError) as raised:
+                        await manager.start_bot(bot_id)
+
+                self.assertFalse(mocked.called)
+                self.assertEqual(db.get_bot(bot_id)["status"], "dependency_missing")
+                self.assertIn("Missing import(s): telegram", str(raised.exception))
+                self.assertTrue(
+                    any("Missing import(s): telegram" in row["line"] for row in db.get_logs(bot_id, 20))
                 )
 
         asyncio.run(run_case())

@@ -62,6 +62,12 @@ class DenylistVisitor(ast.NodeVisitor):
         root = module.split(".", 1)[0]
         if root in DENIED_IMPORT_ROOTS:
             self.errors.append(f"Denied import: {module}")
+        if module == "telegram" and any(
+            alias.name == "ParseMode" for alias in node.names
+        ):
+            self.errors.append(
+                "Import ParseMode from telegram.constants, not from telegram."
+            )
         for alias in node.names:
             local_name = alias.asname or alias.name
             if (root, alias.name) in DENIED_MODULE_CALLS:
